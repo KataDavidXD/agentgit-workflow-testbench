@@ -6,7 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+.python-version
 # Virtual environments
 .venv
 
 .env
+.pytest_cache/
+.ruff_cache/
