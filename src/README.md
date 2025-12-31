@@ -9,6 +9,7 @@ src/
 ├── api.py                  # FastAPI 应用入口与路由定义
 ├── config.py               # 配置加载与校验 (.env 处理)
 ├── exceptions.py           # 自定义异常类与 HTTP 异常映射
+├── db_service/             # 审计数据库服务：记录 env 副作用操作 (env_operations)
 ├── models.py               # Pydantic 数据模型 (请求/响应/校验)
 ├── services/               # 核心业务逻辑服务 (详见 services/README.md)
 │   ├── dep_manager.py      # 依赖管理逻辑
@@ -25,6 +26,7 @@ src/
 - **核心功能**: 系统的唯一对外部入口，负责路由请求。
 - **关键逻辑**:
   - **应用工厂**: 使用 `create_app()` 动态创建 FastAPI 实例。
+  - **审计数据库初始化**: 启动时初始化审计表并校验数据库连接；所有副作用操作必须写入审计，否则返回 `DB_AUDIT_ERROR`。
   - **依赖注入**: 使用 `Depends` 注入 `EnvManager` 等服务。
   - **路由组**:
     - `POST /envs`: 环境创建。

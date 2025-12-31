@@ -43,6 +43,11 @@ class UVExecutionError(ServiceError):
         super().__init__(http_status=500, code="UV_EXECUTION_ERROR", message=message)
 
 
+class DBAuditError(ServiceError):
+    def __init__(self, message: str = "Database auditing failed"):
+        super().__init__(http_status=500, code="DB_AUDIT_ERROR", message=message)
+
+
 class ExecutionTimeout(ServiceError):
     def __init__(self, message: str = "Code execution timed out"):
         super().__init__(http_status=504, code="EXECUTION_TIMEOUT", message=message)

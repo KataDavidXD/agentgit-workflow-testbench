@@ -13,6 +13,9 @@
 - ORM Model：`EnvOperation`
 - 主要用途：记录每次对 env 的操作结果与执行输出（stdout/stderr）
 
+> [!IMPORTANT]
+> 本项目为主服务的**强制审计依赖**：服务启动时会自动 `init_db()` 建表并校验 `DATABASE_URL` 连接；写入失败会导致对应接口返回 `DB_AUDIT_ERROR`。
+
 ---
 
 ## 2. 字段定义

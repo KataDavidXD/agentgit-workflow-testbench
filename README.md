@@ -561,6 +561,7 @@ sequenceDiagram
 | `DATA_ROOT` | `/data` | 物理分区挂载点 |
 | `ENVS_BASE_PATH` | `${DATA_ROOT}/envs` | 虚拟环境存储目录 |
 | `UV_CACHE_DIR` | `${DATA_ROOT}/uv_cache` | **必须与 ENVS_BASE_PATH 同一分区且平级** |
+| `DATABASE_URL` | `postgresql://...` | 审计数据库连接串（记录 env 副作用操作），服务启动时会自动建表并校验连接 |
 | `DEFAULT_PYTHON` | `3.11` | 默认 Python 版本 |
 | `EXECUTION_TIMEOUT` | `30` | 代码执行默认超时（秒） |
 | `CLEANUP_IDLE_HOURS` | `72` | 自动清理闲置环境阈值（小时） |
@@ -569,6 +570,13 @@ sequenceDiagram
 > **硬性物理条件**
 > 
 > `UV_CACHE_DIR` 必须配置在与 `ENVS_BASE_PATH` **相同的物理分区**上，且为平级目录，否则无法使用 Hardlink 节省磁盘空间。
+
+> [!IMPORTANT]
+> **审计数据库为强制依赖**
+>
+> - ✅ 所有会对 env 产生副作用的操作（create/delete/add/update/remove/sync/run/cleanup）都会写入 `env_operations` 审计表
+> - ✅ 服务启动时会执行 `init_db()` 自动建表并做一次 `SELECT 1` 连接校验
+> - ❌ 若数据库不可连接或审计写入失败，相关请求会返回 `DB_AUDIT_ERROR` (500)
 
 ---
 
@@ -581,5 +589,6 @@ sequenceDiagram
 | 409 | `ENV_ALREADY_EXISTS` | 环境已存在 |
 | 422 | `PACKAGE_RESOLUTION_FAILED` | 依赖解析失败 |
 | 423 | `ENV_LOCKED` | 环境正在被其他操作使用 |
+| 500 | `DB_AUDIT_ERROR` | 审计数据库初始化/连接失败或审计写入失败 |
 | 500 | `UV_EXECUTION_ERROR` | UV 命令执行失败 |
 | 504 | `EXECUTION_TIMEOUT` | 代码执行超时 |

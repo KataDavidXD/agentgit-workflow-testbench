@@ -2,6 +2,9 @@
 
 本目录包含系统的核心业务逻辑实现，负责环境管理、依赖操作、并发控制及底层命令执行。
 
+> [!IMPORTANT]
+> `services/` 目录中的操作会通过接口层 (`src/api.py`) 写入审计数据库（`src/db_service`，表 `env_operations`）。
+
 ## 模块列表
 
 ### 1. `env_manager.py` (环境管理器)

@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from httpx import ASGITransport, AsyncClient
 
 from src.api import create_app
 from src.config import Settings
+from src.db_service.connection import SessionLocal, engine, init_db
+from src.db_service.models import EnvOperation
 
 from fake_uv import FakeUVCommandExecutor
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_audit_db() -> None:
+    try:
+        init_db()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        pytest.skip(f"Audit DB not reachable: {e}")
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -136,3 +150,42 @@ async def test_cleanup_deletes_idle_envs(tmp_path: Path) -> None:
         body = resp.json()
         assert "wf4_node_4" in body["deleted"]
         assert not (settings.envs_base_path / "wf4_node_4").exists()
+
+
+@pytest.mark.anyio
+async def test_audit_record_written_on_create_env(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    executor = FakeUVCommandExecutor(settings.envs_base_path, settings.uv_cache_dir)
+    app = create_app(settings, executor=executor)
+
+    workflow_id = f"wf-audit-{uuid.uuid4().hex[:8]}"
+    node_id = f"node-audit-{uuid.uuid4().hex[:8]}"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/envs",
+            json={"workflow_id": workflow_id, "node_id": node_id, "packages": ["requests"]},
+        )
+        assert resp.status_code == 200, resp.text
+
+    db = SessionLocal()
+    try:
+        rec = (
+            db.query(EnvOperation)
+            .filter(
+                EnvOperation.workflow_id == workflow_id,
+                EnvOperation.node_id == node_id,
+                EnvOperation.operation == "create_env",
+                EnvOperation.status == "success",
+            )
+            .order_by(EnvOperation.created_at.desc())
+            .first()
+        )
+        assert rec is not None
+    finally:
+        db.query(EnvOperation).filter(
+            EnvOperation.workflow_id == workflow_id,
+            EnvOperation.node_id == node_id,
+        ).delete()
+        db.commit()
+        db.close()
