@@ -21,6 +21,7 @@ from src.services.uv_executor import UVCommandExecutor
 from src.db_service.models import EnvOperation
 from src.db_service.env_audit import EnvAudit
 from src.db_service.connection import get_db
+from sqlalchemy.orm import Session
 
 def create_app(settings: Settings | None = None, *, executor: UVCommandExecutor | None = None) -> FastAPI:
     """Create a FastAPI application instance."""
