@@ -77,15 +77,15 @@ LangGraph 工作流中的每个节点可能需要执行不同的 Python 代码�
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │                      FastAPI Application                        │ │
 │  │  POST /envs                       - 创建环境 (uv init)                   │ │
-│  │  GET  /envs/{workflow_id}/{node_id} - 查询环境状态                          │ │
-│  │  DELETE /envs/{workflow_id}/{node_id} - 删除环境                            │ │
-│  │  POST /envs/{workflow_id}/{node_id}/deps - 添加依赖 (uv add)               │ │
-│  │  GET  /envs/{workflow_id}/{node_id}/deps - 列出依赖 (读取 pyproject.toml)  │ │
-│  │  PUT  /envs/{workflow_id}/{node_id}/deps - 更新依赖 (uv add --upgrade)     │ │
-│  │  DELETE /envs/{workflow_id}/{node_id}/deps - 删除依赖 (uv remove)          │ │
-│  │  POST /envs/{workflow_id}/{node_id}/sync - 同步环境 (uv sync)              │ │
-│  │  GET  /envs/{workflow_id}/{node_id}/export - 导出 lock 文件                │ │
-│  │  POST /envs/{workflow_id}/{node_id}/run - 执行代码 (uv run)                │ │
+│  │  GET  /envs/{workflow_id}/{node_id} - 查询环境状态 (可选 version_id)             │ │
+│  │  DELETE /envs/{workflow_id}/{node_id} - 删除环境 (可选 version_id)               │ │
+│  │  POST /envs/{workflow_id}/{node_id}/deps - 添加依赖 (uv add) (可选 version_id)   │ │
+│  │  GET  /envs/{workflow_id}/{node_id}/deps - 列出依赖 (可选 version_id)           │ │
+│  │  PUT  /envs/{workflow_id}/{node_id}/deps - 更新依赖 (可选 version_id)           │ │
+│  │  DELETE /envs/{workflow_id}/{node_id}/deps - 删除依赖 (可选 version_id)         │ │
+│  │  POST /envs/{workflow_id}/{node_id}/sync - 同步环境 (uv sync) (可选 version_id)  │ │
+│  │  GET  /envs/{workflow_id}/{node_id}/export - 导出 lock 文件 (可选 version_id)   │ │
+│  │  POST /envs/{workflow_id}/{node_id}/run - 执行代码 (uv run) (可选 version_id)    │ │
 │  │  POST /envs/cleanup               - 清理过期环境                          │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
@@ -97,17 +97,15 @@ LangGraph 工作流中的每个节点可能需要执行不同的 Python 代码�
 │  │  /data/                       <- 挂载的磁盘卷/物理分区根目录      │ │
 │  │    │                                                            │ │
 │  │    ├── envs/                  <- ENVS_BASE_PATH                 │ │
-│  │    │   ├── node_a/            <- 独立 UV 项目                    │ │
+│  │    │   ├── workflow123_node123_v1/ <- 独立 UV 项目 (含 version_id)      │ │
 │  │    │   │   ├── .venv/         <- 虚拟环境                        │ │
 │  │    │   │   ├── pyproject.toml <- 项目配置 + 依赖声明             │ │
 │  │    │   │   ├── uv.lock        <- 精确版本锁定                    │ │
 │  │    │   │   └── metadata.json  <- 环境元数据                      │ │
-│  │    │   ├── node_b/                                              │ │
+│  │    │   ├── workflow123_node123/  <- 独立 UV 项目 (无 version_id)        │ │
 │  │    │   │   ├── .venv/                                           │ │
-│  │    │   │   ├── pyproject.toml                                   │ │
-│  │    │   │   ├── uv.lock                                          │ │
-│  │    │   │   └── metadata.json                                    │ │
-│  │    │   └── ...                                                  │ │
+│  │    │   │   └── ...                                              │ │
+│  │    │   └── ...  (命名格式: workflow_id_node_id[_version_id])        │ │
 │  │    │                                                            │ │
 │  │    └── uv_cache/              <- UV_CACHE_DIR (平级目录!)        │ │
 │  │        ├── wheels/            <- 下载的 whl 包                   │ │
@@ -265,12 +263,15 @@ class LockManager:
 ### 3.1 每个节点的目录结构
 
 ```
-envs/node_abc/
+envs/workflow123_node123_v1/  # 格式: {workflow_id}_{node_id}_{version_id}
 ├── .venv/                  # UV 自动管理的虚拟环境
 ├── pyproject.toml          # 项目配置 + 依赖声明
 ├── uv.lock                 # 精确版本锁定（可复现）
 └── metadata.json           # 环境元数据
 ```
+
+> [!NOTE]
+> 文件夹命名格式：`{workflow_id}_{node_id}[_{version_id}]`。`version_id` 为可选参数，若提供则包含在目录名中，并存入数据库审计表。
 
 ### 3.2 pyproject.toml 示例
 
@@ -309,11 +310,11 @@ dependencies = [
 /data/                            <- 挂载的磁盘卷或物理分区根目录
 │
 ├── envs/                         <- ENVS_BASE_PATH
-│   ├── node_a/
+│   ├── workflow123_node123/      <- 命名格式: workflow_id_node_id
 │   │   ├── .venv/
 │   │   ├── pyproject.toml
 │   │   └── uv.lock
-│   └── node_b/
+│   └── workflow345_node345/
 │       ├── .venv/
 │       ├── pyproject.toml
 │       └── uv.lock
@@ -340,49 +341,58 @@ dependencies = [
 
 #### POST /envs — 创建环境
 
-**请求体**:
-```json
-{
-    "node_id": "node_abc123",
-    "python_version": "3.11",
-    "packages": ["numpy>=1.24.0", "pandas>=2.0.0"]
-}
+**请求体** (Form 数据):
+```
+workflow_id: "workflow123"
+node_id: "node123"
+version_id: "v1" (可选)
+python_version: "3.11" (可选)
+packages: ["numpy>=1.24.0", "pandas>=2.0.0"] (可选)
+requirements_file: <file> (可选)
 ```
 
 **响应**:
 ```json
 {
-    "node_id": "node_abc123",
-    "env_path": "/data/envs/node_abc123",
+    "workflow_id": "workflow123",
+    "node_id": "node123",
+    "version_id": "v1",
+    "env_path": "/data/envs/workflow123_node123_v1",
     "python_version": "3.11",
     "status": "created",
-    "pyproject_toml": "[project]\nname = \"node-abc123\"..."
+    "pyproject_toml": "[project]\nname = \"workflow123-node123\"..."
 }
 ```
 
 ---
 
-#### GET /envs/{node_id}/export — 导出环境配置
+#### GET /envs/{workflow_id}/{node_id}/export — 导出环境配置
+
+**查询参数**:
+- `version_id`: "v1" (可选)
 
 **响应**:
 ```json
 {
-    "node_id": "node_abc123",
+    "workflow_id": "workflow123",
+    "node_id": "node123",
+    "version_id": "v1",
     "pyproject_toml": "...",
     "uv_lock": "..."
 }
-```
+``````
 
 ---
 
-#### POST /envs/{node_id}/sync — 从 lock 文件同步环境
+#### POST /envs/{workflow_id}/{node_id}/sync — 从 lock 文件同步环境
 
 用于从 `uv.lock` 重建 `.venv`，实现环境复现。
 
 **响应**:
 ```json
 {
-    "node_id": "node_abc123",
+    "workflow_id": "workflow123",
+    "node_id": "node123",
     "status": "synced",
     "packages_installed": 15
 }
@@ -392,7 +402,7 @@ dependencies = [
 
 ### 5.2 依赖管理 (CRUD)
 
-#### POST /envs/{node_id}/deps — 添加依赖 (uv add)
+#### POST /envs/{workflow_id}/{node_id}/deps — 添加依赖 (uv add)
 
 **请求体**:
 ```json
@@ -403,7 +413,7 @@ dependencies = [
 
 ---
 
-#### DELETE /envs/{node_id}/deps — 删除依赖 (uv remove)
+#### DELETE /envs/{workflow_id}/{node_id}/deps — 删除依赖 (uv remove)
 
 **请求体**:
 ```json
@@ -414,14 +424,15 @@ dependencies = [
 
 ---
 
-#### GET /envs/{node_id}/deps — 列出依赖
+#### GET /envs/{workflow_id}/{node_id}/deps — 列出依赖
 
 从 `pyproject.toml` 读取依赖列表。
 
 **响应**:
 ```json
 {
-    "node_id": "node_abc123",
+    "workflow_id": "workflow123",
+    "node_id": "node123",
     "dependencies": [
         "numpy>=1.24.0",
         "pandas>=2.0.0"
@@ -437,7 +448,7 @@ dependencies = [
 
 ### 5.3 代码执行
 
-#### POST /envs/{node_id}/run — 执行代码 (uv run)
+#### POST /envs/{workflow_id}/{node_id}/run — 执行代码 (uv run)
 
 ```json
 {
@@ -529,24 +540,24 @@ class UVCommandExecutor:
 sequenceDiagram
     participant User
     participant API
-    participant NodeA as Node A
-    participant NodeB as Node B (新建)
+    participant NodeA as workflow123_node123
+    participant NodeB as workflow345_node345 (新建)
     
     Note over NodeA: 已有环境
-    User->>API: GET /envs/node_a/export
+    User->>API: GET /envs/workflow123/node123/export
     API->>NodeA: 读取 pyproject.toml + uv.lock
     NodeA-->>API: 返回配置文件
     API-->>User: { pyproject_toml, uv_lock }
     
     Note over User: 保存配置用于复现
     
-    User->>API: POST /envs { node_id: "node_b" }
-    API->>NodeB: uv init
+    User->>API: POST /envs { workflow_id: "workflow345", node_id: "node345" }
+    API->>NodeB: uv init (创建 workflow345_node345/)
     NodeB-->>API: 项目初始化完成
     
     User->>API: 写入 pyproject.toml + uv.lock
     
-    User->>API: POST /envs/node_b/sync
+    User->>API: POST /envs/workflow345/node345/sync
     API->>NodeB: uv sync (从 lock 重建)
     NodeB-->>API: 环境完全复现
     API-->>User: { status: "synced" }
@@ -577,6 +588,7 @@ sequenceDiagram
 > - ✅ 所有会对 env 产生副作用的操作（create/delete/add/update/remove/sync/run/cleanup）都会写入 `env_operations` 审计表
 > - ✅ 服务启动时会执行 `init_db()` 自动建表并做一次 `SELECT 1` 连接校验
 > - ❌ 若数据库不可连接或审计写入失败，相关请求会返回 `DB_AUDIT_ERROR` (500)
+> - 📋 审计表当前记录 `workflow_id` 和 `node_id`，后续计划支持可选的 `version_id` 参数，用于环境版本管理
 
 ---
 

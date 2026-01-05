@@ -55,11 +55,13 @@ class EnvAudit:
         db: Session,
         workflow_id: str,
         node_id: str,
+        version_id: str | None = None,
     ) -> None:
         self._db = db
         self._repo = EnvOperationRepository(db)
         self._workflow_id = workflow_id
         self._node_id = node_id
+        self._version_id = version_id
 
     # ------------------------------------------------------------------
     # Timing helpers
@@ -74,7 +76,7 @@ class EnvAudit:
 
     @staticmethod
     def _duration_ms(start_time: float) -> float:
-        return (time.time() - start_time) * 1000
+        return time.time() - start_time
 
     # ------------------------------------------------------------------
     # Record helpers
@@ -96,6 +98,7 @@ class EnvAudit:
         self._repo.create(
             workflow_id=self._workflow_id,
             node_id=self._node_id,
+            version_id=self._version_id,
             operation=operation,
             status="success",
             stdout=stdout,
@@ -122,6 +125,7 @@ class EnvAudit:
         self._repo.create(
             workflow_id=self._workflow_id,
             node_id=self._node_id,
+            version_id=self._version_id,
             operation=operation,
             status="failed",
             stderr=error,

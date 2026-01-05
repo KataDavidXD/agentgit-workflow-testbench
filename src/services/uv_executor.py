@@ -26,15 +26,18 @@ class UVCommandExecutor:
         self.is_windows = sys.platform == "win32"
         self._logger = logging.getLogger(__name__)
 
-    def _get_project_path(self, node_id: str) -> Path:
+    def _get_project_path(self, env_id: str) -> Path:
         """Construct the absolute path to the project directory."""
-        return self.envs_base_path / node_id
+        return self.envs_base_path / env_id
 
     async def _run(self, cmd: list[str], timeout_seconds: int | None = None) -> UVResult:
         """Execute a UV command as a subprocess with isolation and timeout."""
         # Inject UV_CACHE_DIR to ensure hardlink-based optimization works
         env = os.environ.copy()
         env["UV_CACHE_DIR"] = str(self.uv_cache_dir)
+        # Remove VIRTUAL_ENV to avoid mismatch warnings when running in isolated node projects
+        env.pop("VIRTUAL_ENV", None)
+        env.pop("PYTHONPATH", None)  # Also clear PYTHONPATH for better isolation
 
         self._logger.info("uv_exec cmd=%s", cmd)
         # Spawn subprocess with isolated env and piped streams
@@ -68,9 +71,9 @@ class UVCommandExecutor:
             raise PackageResolutionFailed(message)
         raise UVExecutionError(message)
 
-    async def init_project(self, node_id: str, python_version: str) -> UVResult:
+    async def init_project(self, env_id: str, python_version: str) -> UVResult:
         """Initialize a new UV project with a specific Python version."""
-        project_path = self._get_project_path(node_id)
+        project_path = self._get_project_path(env_id)
         project_path.mkdir(parents=True, exist_ok=True)
         cmd = ["uv", "init", str(project_path), "--python", python_version, "--no-workspace"]
         result = await self._run(cmd)
@@ -80,14 +83,14 @@ class UVCommandExecutor:
 
     async def add_packages(
         self,
-        node_id: str,
+        env_id: str,
         packages: list[str],
         *,
         upgrade: bool = False,
     ) -> UVResult:
         """Install new packages into the project environment."""
-        project_path = self._get_project_path(node_id)
-        cmd = ["uv", "add", "--project", str(project_path), "--no-workspace"]
+        project_path = self._get_project_path(env_id)
+        cmd = ["uv", "add", "--project", str(project_path)]
         if upgrade:
             cmd.append("--upgrade")
         cmd.extend(packages)
@@ -96,27 +99,27 @@ class UVCommandExecutor:
             self._raise_for_failure(result, "uv add failed")
         return result
 
-    async def remove_packages(self, node_id: str, packages: list[str]) -> UVResult:
+    async def remove_packages(self, env_id: str, packages: list[str]) -> UVResult:
         """Remove specified packages from the project."""
-        project_path = self._get_project_path(node_id)
-        cmd = ["uv", "remove", "--project", str(project_path), "--no-sync", *packages]
+        project_path = self._get_project_path(env_id)
+        cmd = ["uv", "remove", "--project", str(project_path), *packages]
         result = await self._run(cmd)
         if result.exit_code != 0:
             self._raise_for_failure(result, "uv remove failed")
         return result
 
-    async def sync_env(self, node_id: str) -> UVResult:
+    async def sync_env(self, env_id: str) -> UVResult:
         """Synchronize the virtual environment with the lock file."""
-        project_path = self._get_project_path(node_id)
+        project_path = self._get_project_path(env_id)
         cmd = ["uv", "sync", "--project", str(project_path)]
         result = await self._run(cmd)
         if result.exit_code != 0:
             self._raise_for_failure(result, "uv sync failed")
         return result
 
-    async def run_code(self, node_id: str, code: str, *, timeout_seconds: int) -> UVResult:
+    async def run_code(self, env_id: str, code: str, *, timeout_seconds: int) -> UVResult:
         """Execute arbitrary Python code within the isolated environment."""
-        project_path = self._get_project_path(node_id)
+        project_path = self._get_project_path(env_id)
         cmd = ["uv", "run", "--project", str(project_path), "python", "-c", code]
         result = await self._run(cmd, timeout_seconds=timeout_seconds)
         return result

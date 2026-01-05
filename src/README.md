@@ -29,11 +29,11 @@ src/
   - **审计数据库初始化**: 启动时初始化审计表并校验数据库连接；所有副作用操作必须写入审计，否则返回 `DB_AUDIT_ERROR`。
   - **依赖注入**: 使用 `Depends` 注入 `EnvManager` 等服务。
   - **路由组**:
-    - `POST /envs`: 环境创建。
-    - `GET /envs/{workflow_id}/{node_id}`: 状态查询。
-    - `POST /envs/{workflow_id}/{node_id}/run`: **代码执行核心**。
-    - `POST /envs/{workflow_id}/{node_id}/deps`: 动态扩展依赖。
-    - **注意**: 采用 `/envs/{workflow_id}/{node_id}` 的层次结构，使 API 符合 RESTful 规范，并显式区分不同工作流下的节点环境。
+    - `POST /envs`: 环境创建 (支持 `version_id`)。
+    - `GET /envs/{workflow_id}/{node_id}`: 状态查询 (支持 `version_id`)。
+    - `POST /envs/{workflow_id}/{node_id}/run`: **代码执行核心** (支持 `version_id`)。
+    - `POST /envs/{workflow_id}/{node_id}/deps`: 动态扩展依赖 (支持 `version_id`)。
+    - **注意**: 采用 `/envs/{workflow_id}/{node_id}` 的层次结构，配合可选的 `version_id` 查询参数，显式区分不同工作流、不同节点及不同版本的环境。
   - **异常捕获**: 全局集成 `ServiceError` 捕获器，将业务异常自动转换为标准的 HTTP 响应。
 
 ### 2. `config.py` (配置层)
@@ -48,9 +48,9 @@ src/
 ### 3. `models.py` (模型层)
 - **核心功能**: 定义数据契约与自动化验证。
 - **主要模型**:
-  - `CreateEnvRequest`: 校验 `node_id` 格式，过滤空包名，支持可选的 `python_version`。
-  - `RunRequest`: 校验执行代码 `code` 不能为空。
-  - `EnvStatusResponse`: 结构化输出环境状态，包含已安装依赖和锁定版本。
+  - `CreateEnvRequest`: 校验 `node_id` 格式，过滤空包名，支持可选的 `python_version` 和 `version_id`。
+  - `RunRequest`: 校验执行代码 `code` 不能为空，支持可选的 `version_id`。
+  - `EnvStatusResponse`: 结构化输出环境状态，包含已安装依赖、锁定版本及 `version_id`。
   - `UVResult`: 封装底层命令执行结果，包含 `stdout`, `stderr` 和 `returncode`。
 
 ### 4. `exceptions.py` (异常层)

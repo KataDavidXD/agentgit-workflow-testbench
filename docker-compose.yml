@@ -1,0 +1,21 @@
+services:
+  api:
+    build: .
+    container_name: uv_api_server
+    # 使用非 root 用户运行
+    user: "appuser"
+    ports:
+      - "8435:8435"
+    volumes:
+      # 挂载源码实现热重载
+      - ./src:/app/src
+      # 挂载数据卷实现持久化和硬链接
+      - uv_data:/data
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://agentgit:agentgit_dev_password@host.docker.internal:54320/agentgit_testing}
+    # 极简启动命令，使用 uv run 确保找到 uvicorn
+    command: uv run uvicorn src.api:app --host 0.0.0.0 --port 8435 --reload
+    restart: unless-stopped
+
+volumes:
+  uv_data:

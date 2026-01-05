@@ -23,13 +23,12 @@ class EnvStatus:
 
 
 class EnvManager:
-    """Environmental lifecycle management: creation, deletion, query, export, execution, cleanup."""
+    """Manages the full lifecycle of node environments."""
 
     def __init__(
         self,
         envs_base_path: Path,
         executor: UVCommandExecutor,
-        *,
         default_python: str,
         execution_timeout_seconds: int,
     ) -> None:
@@ -38,56 +37,65 @@ class EnvManager:
         self.default_python = default_python
         self.execution_timeout_seconds = execution_timeout_seconds
 
-    def _project_path(self, node_id: str) -> Path:
+    @staticmethod
+    def get_env_id(workflow_id: str, node_id: str, version_id: str | None = None) -> str:
+        """Generate a unique environment identifier/directory name."""
+        base = f"{workflow_id}_{node_id}"
+        if version_id:
+            return f"{base}_{version_id}"
+        return base
+
+    def _project_path(self, env_id: str) -> Path:
         """Get the root directory of an environment."""
-        return self.envs_base_path / node_id
+        return self.envs_base_path / env_id
 
-    def _metadata_path(self, node_id: str) -> Path:
+    def _metadata_path(self, env_id: str) -> Path:
         """Get the path to the metadata.json file."""
-        return self._project_path(node_id) / "metadata.json"
+        return self._project_path(env_id) / "metadata.json"
 
-    def _read_metadata(self, node_id: str) -> dict[str, Any] | None:
-        """Read environment metadata from disk."""
-        path = self._metadata_path(node_id)
+    def _read_metadata(self, env_id: str) -> dict[str, Any] | None:
+        path = self._metadata_path(env_id)
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
-    def _write_metadata(self, node_id: str, metadata: dict[str, Any]) -> None:
-        """Write environment metadata to disk."""
-        path = self._metadata_path(node_id)
-        path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _write_metadata(self, env_id: str, metadata: dict[str, Any]) -> None:
+        path = self._metadata_path(env_id)
+        path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    def _touch_last_used(self, node_id: str) -> None:
+    def _touch_last_used(self, env_id: str) -> None:
         """Update the last used timestamp in metadata."""
-        metadata = self._read_metadata(node_id) or {}
-        metadata["node_id"] = node_id
+        metadata = self._read_metadata(env_id) or {}
+        metadata["env_id"] = env_id
         metadata["last_used_at"] = datetime.now(timezone.utc).isoformat()
         if "created_at" not in metadata:
             metadata["created_at"] = metadata["last_used_at"]
-        self._write_metadata(node_id, metadata)
+        self._write_metadata(env_id, metadata)
 
-    def touch(self, node_id: str) -> None:
+    def touch(self, env_id: str) -> None:
         """Public method to update activity timestamp."""
-        project_path = self._project_path(node_id)
+        project_path = self._project_path(env_id)
         if not project_path.exists():
             raise EnvNotFound()
-        self._touch_last_used(node_id)
+        self._touch_last_used(env_id)
 
     async def create_env(
         self,
-        node_id: str,
+        env_id: str,
         *,
         python_version: str | None,
         packages: list[str],
     ) -> tuple[Path, str]:
         """Create a new UV project and optionally install initial packages."""
-        project_path = self._project_path(node_id)
+        project_path = self._project_path(env_id)
         version = python_version or self.default_python
 
         try:
             if not project_path.exists():
-                await self.executor.init_project(node_id, version)
+                await self.executor.init_project(env_id, version)
         except Exception:
             # If environment creation failed, check if it was created concurrently
             if project_path.exists():
@@ -95,18 +103,18 @@ class EnvManager:
             else:
                 raise
 
-        self._touch_last_used(node_id)
+        self._touch_last_used(env_id)
 
         if packages:
             mapped_packages = ProjectInfo.get_instance().get_dependency_mapping(packages)
-            await self.executor.add_packages(node_id, mapped_packages)
-            self._touch_last_used(node_id)
+            await self.executor.add_packages(env_id, mapped_packages)
+            self._touch_last_used(env_id)
 
         return project_path, version
 
-    def get_status(self, node_id: str) -> EnvStatus:
+    def get_status(self, env_id: str) -> EnvStatus:
         """Check the current status and components of an environment."""
-        project_path = self._project_path(node_id)
+        project_path = self._project_path(env_id)
         if not project_path.exists():
             return EnvStatus(
                 status="NOT_EXISTS",
@@ -120,7 +128,7 @@ class EnvManager:
         pyproject_path = project_path / "pyproject.toml"
         uv_lock_path = project_path / "uv.lock"
         venv_path = project_path / ".venv"
-        metadata = self._read_metadata(node_id)
+        metadata = self._read_metadata(env_id)
 
         return EnvStatus(
             status="ACTIVE",
@@ -131,52 +139,40 @@ class EnvManager:
             metadata=metadata,
         )
 
-    def export_env(self, node_id: str) -> tuple[str, str | None]:
-        """Export pyproject.toml and uv.lock contents."""
-        project_path = self._project_path(node_id)
+    async def delete_env(self, env_id: str) -> bool:
+        """Remove the environment directory and all its contents."""
+        project_path = self._project_path(env_id)
         if not project_path.exists():
-            raise EnvNotFound()
-        pyproject_path = project_path / "pyproject.toml"
-        if not pyproject_path.exists():
-            raise EnvNotFound("pyproject.toml does not exist")
-        uv_lock_path = project_path / "uv.lock"
+            return False
 
-        self._touch_last_used(node_id)
-        return (
-            pyproject_path.read_text(encoding="utf-8"),
-            uv_lock_path.read_text(encoding="utf-8") if uv_lock_path.exists() else None,
-        )
+        import shutil
 
-    async def sync(self, node_id: str) -> UVResult:
+        shutil.rmtree(project_path, ignore_errors=True)
+        return True
+
+    async def sync(self, env_id: str) -> UVResult:
         """Re-sync the environment from uv.lock."""
-        project_path = self._project_path(node_id)
+        project_path = self._project_path(env_id)
         if not project_path.exists():
             raise EnvNotFound()
-        result = await self.executor.sync_env(node_id)
-        self._touch_last_used(node_id)
+        result = await self.executor.sync_env(env_id)
+        self._touch_last_used(env_id)
         return result
 
-    async def run(self, node_id: str, code: str, *, timeout_seconds: int | None) -> UVResult:
+    async def run(self, env_id: str, code: str, *, timeout_seconds: int | None) -> UVResult:
         """Execute Python code within the environment."""
-        project_path = self._project_path(node_id)
+        project_path = self._project_path(env_id)
         if not project_path.exists():
             raise EnvNotFound()
 
         timeout = timeout_seconds or self.execution_timeout_seconds
         try:
-            result = await self.executor.run_code(node_id, code, timeout_seconds=timeout)
+            result = await self.executor.run_code(env_id, code, timeout_seconds=timeout)
         except TimeoutError as e:
             raise ExecutionTimeout() from e
 
-        self._touch_last_used(node_id)
+        self._touch_last_used(env_id)
         return result
-
-    def delete_env(self, node_id: str) -> None:
-        """Remove the entire environment directory."""
-        project_path = self._project_path(node_id)
-        if not project_path.exists():
-            raise EnvNotFound()
-        shutil.rmtree(project_path, ignore_errors=False)
 
     def cleanup(self, *, idle_hours: int) -> list[str]:
         """Remove environments that haven't been used for a specified duration."""

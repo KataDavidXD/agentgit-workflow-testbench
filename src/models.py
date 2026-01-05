@@ -14,6 +14,7 @@ class ErrorResponse(BaseModel):
 class CreateEnvRequest(BaseModel):
     workflow_id: str = Field(min_length=1)
     node_id: str = Field(min_length=1)
+    version_id: str | None = Field(default=None)
     python_version: str | None = None
     packages: list[str] = Field(default_factory=list)
 
@@ -28,6 +29,7 @@ class CreateEnvRequest(BaseModel):
 class CreateEnvResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     env_path: str
     python_version: str
     status: str
@@ -37,6 +39,7 @@ class CreateEnvResponse(BaseModel):
 class EnvStatusResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     status: str
     env_path: str
     has_pyproject: bool
@@ -59,6 +62,7 @@ class PackagesRequest(BaseModel):
 class DepsResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     dependencies: list[str]
     locked_versions: dict[str, str]
 
@@ -66,6 +70,7 @@ class DepsResponse(BaseModel):
 class ExportResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     pyproject_toml: str
     uv_lock: str | None
 
@@ -73,6 +78,7 @@ class ExportResponse(BaseModel):
 class SyncResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     status: str
     packages_installed: int | None = None
 
@@ -80,11 +86,13 @@ class SyncResponse(BaseModel):
 class RunRequest(BaseModel):
     code: str = Field(min_length=1)
     timeout: int | None = Field(default=None, ge=1)
+    version_id: str | None = Field(default=None)
 
 
 class RunResponse(BaseModel):
     workflow_id: str
     node_id: str
+    version_id: str | None = None
     stdout: str
     stderr: str
     exit_code: int

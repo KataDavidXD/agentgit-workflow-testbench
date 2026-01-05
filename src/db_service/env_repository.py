@@ -16,6 +16,7 @@ class EnvOperationRepository:
         *,
         workflow_id: str,
         node_id: str,
+        version_id: str | None = None,
         operation: str,
         status: str,
         stdout: str | None = None,
@@ -27,13 +28,14 @@ class EnvOperationRepository:
         record = EnvOperation(
             workflow_id=workflow_id,
             node_id=node_id,
+            version_id=version_id,
             operation=operation,
             status=status,
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
             duration_ms=duration_ms,
-            operation_metadata=metadata,  # 修复：使用 operation_metadata
+            operation_metadata=metadata,
         )
         self.db.add(record)
         self.db.commit()
@@ -59,18 +61,19 @@ class EnvOperationRepository:
             .all()
         )
 
-    def get_by_workflow_and_node(
-        self, workflow_id: str, node_id: str
+    def get_by_workflow_node_version(
+        self, workflow_id: str, node_id: str, version_id: str | None = None
     ) -> list[EnvOperation]:
-        return (
-            self.db.query(EnvOperation)
-            .filter(
-                EnvOperation.workflow_id == workflow_id,
-                EnvOperation.node_id == node_id,
-            )
-            .order_by(EnvOperation.created_at.desc())
-            .all()
+        query = self.db.query(EnvOperation).filter(
+            EnvOperation.workflow_id == workflow_id,
+            EnvOperation.node_id == node_id,
         )
+        if version_id:
+            query = query.filter(EnvOperation.version_id == version_id)
+        else:
+            query = query.filter(EnvOperation.version_id.is_(None))
+
+        return query.order_by(EnvOperation.created_at.desc()).all()
 
     def get_failed_operations(
         self, workflow_id: str | None = None

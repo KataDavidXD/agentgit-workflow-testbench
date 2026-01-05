@@ -1,0 +1,13 @@
+**/.venv
+**/__pycache__
+**/.pytest_cache
+*.pyc
+*.pyo
+*.pyd
+.git
+.github
+.vscode
+tests/
+data/
+uv.lock (if you want to re-generate, but usually kept)
+.env

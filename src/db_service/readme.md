@@ -64,6 +64,7 @@ finally:
 | `id` | `Integer` | 主键，自增 |
 | `workflow_id` | `String(255)` | 工作流标识，索引 |
 | `node_id` | `String(255)` | 节点/环境标识，索引 |
+| `version_id` | `String(255)` | 版本标识（可选），索引 |
 | `operation` | `String(50)` | 操作类型（如 `create_env`, `add_deps` 等），索引 |
 | `status` | `String(20)` | 操作状态（`success` / `failed`），索引 |
 | `stdout` | `Text` | 标准输出内容 |
@@ -74,9 +75,9 @@ finally:
 | `created_at` | `DateTime(timezone=True)` | 记录创建时间（UTC），索引 |
 
 **索引：**
-- 单列索引：`workflow_id`, `node_id`, `operation`, `status`, `created_at`
+- 单列索引：`workflow_id`, `node_id`, `version_id`, `operation`, `status`, `created_at`
 - 复合索引：
-  - `idx_env_ops_workflow_node`：`(workflow_id, node_id)`
+  - `idx_env_ops_wf_node_ver`：`(workflow_id, node_id, version_id)`
   - `idx_env_ops_node_operation`：`(node_id, operation)`
 - 特殊索引（通过 DDL 事件创建）：
   - `idx_env_ops_metadata`：GIN 索引，用于 JSONB 查询
@@ -90,6 +91,7 @@ from src.db_service.models import EnvOperation
 record = EnvOperation(
     workflow_id="workflow_123",
     node_id="node_456",
+    version_id="v1",
     operation="add_deps",
     status="success",
     stdout="...",
@@ -113,7 +115,7 @@ record = EnvOperation(
 | `get_by_id(record_id)` | 根据 ID 查询记录 |
 | `get_by_workflow_id(workflow_id)` | 查询指定工作流的所有操作（按时间倒序） |
 | `get_by_node_id(node_id)` | 查询指定节点的所有操作（按时间倒序） |
-| `get_by_workflow_and_node(workflow_id, node_id)` | 查询指定工作流和节点的操作（按时间倒序） |
+| `get_by_workflow_node_version(workflow_id, node_id, version_id=None)` | 查询指定工作流、节点及版本的操作（按时间倒序） |
 | `get_failed_operations(workflow_id=None)` | 查询失败的操作（可选按工作流过滤） |
 | `delete_by_workflow_id(workflow_id)` | 删除指定工作流的所有记录 |
 
@@ -169,7 +171,8 @@ db = SessionLocal()
 audit = EnvAudit(
     db=db,
     workflow_id="workflow_123",
-    node_id="node_456"
+    node_id="node_456",
+    version_id="v1"
 )
 
 start_time = audit.start()
