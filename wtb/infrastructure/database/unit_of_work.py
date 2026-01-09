@@ -20,6 +20,7 @@ from .repositories import (
     CheckpointFileRepository,
 )
 from .repositories.outbox_repository import SQLAlchemyOutboxRepository
+from .repositories.audit_repository import SQLAlchemyAuditLogRepository
 
 
 class SQLAlchemyUnitOfWork(IUnitOfWork):
@@ -60,6 +61,7 @@ class SQLAlchemyUnitOfWork(IUnitOfWork):
         self.variants = NodeVariantRepository(self._session)
         self.batch_tests = BatchTestRepository(self._session)
         self.evaluation_results = EvaluationResultRepository(self._session)
+        self.audit_logs = SQLAlchemyAuditLogRepository(self._session)
         
         # Initialize WTB Anti-Corruption Layer repositories
         self.node_boundaries = NodeBoundaryRepository(self._session)

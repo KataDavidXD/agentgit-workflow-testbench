@@ -5,11 +5,12 @@ Factory pattern for creating application services with proper dependency injecti
 Simplifies service creation while maintaining flexibility for testing.
 """
 
-from typing import Optional
+from typing import Optional, Callable
 
 from wtb.domain.interfaces.state_adapter import IStateAdapter
 from wtb.domain.interfaces.unit_of_work import IUnitOfWork
 from wtb.domain.interfaces.node_executor import INodeExecutor
+from wtb.domain.interfaces.batch_runner import IBatchTestRunner
 from wtb.config import WTBConfig, get_config
 from wtb.infrastructure.database import (
     UnitOfWorkFactory,
@@ -246,3 +247,150 @@ class NodeReplacerFactory:
         uow = InMemoryUnitOfWork()
         return NodeReplacerFactory.create_with_dependencies(uow)
 
+
+class BatchTestRunnerFactory:
+    """
+    Factory for creating batch test runners.
+    
+    Supports two implementations:
+    - ThreadPoolBatchTestRunner: Local multithreaded execution
+    - RayBatchTestRunner: Distributed execution via Ray cluster
+    
+    Usage:
+        # Auto-select based on config
+        runner = BatchTestRunnerFactory.create(config)
+        
+        # Explicit ThreadPool
+        runner = BatchTestRunnerFactory.create_threadpool(max_workers=4)
+        
+        # Explicit Ray
+        runner = BatchTestRunnerFactory.create_ray(config)
+        
+        # For testing
+        runner = BatchTestRunnerFactory.create_for_testing()
+    """
+    
+    @staticmethod
+    def create(config: Optional[WTBConfig] = None) -> IBatchTestRunner:
+        """
+        Create batch test runner based on configuration.
+        
+        Selects Ray if ray_enabled=True in config, otherwise ThreadPool.
+        
+        Args:
+            config: WTB configuration (uses global config if None)
+            
+        Returns:
+            IBatchTestRunner implementation
+        """
+        if config is None:
+            config = get_config()
+        
+        # Check if Ray is enabled and available
+        ray_enabled = getattr(config, 'ray_enabled', False)
+        ray_config = getattr(config, 'ray_config', None)
+        
+        if ray_enabled and ray_config is not None:
+            return BatchTestRunnerFactory.create_ray(config)
+        else:
+            return BatchTestRunnerFactory.create_threadpool(config)
+    
+    @staticmethod
+    def create_threadpool(
+        config: Optional[WTBConfig] = None,
+        max_workers: int = 4,
+        execution_timeout_seconds: float = 300.0,
+    ) -> IBatchTestRunner:
+        """
+        Create ThreadPool-based batch test runner.
+        
+        Args:
+            config: WTB configuration for UoW and StateAdapter factories
+            max_workers: Maximum concurrent workers
+            execution_timeout_seconds: Timeout per variant execution
+            
+        Returns:
+            ThreadPoolBatchTestRunner instance
+        """
+        from .services.batch_test_runner import ThreadPoolBatchTestRunner
+        
+        if config is None:
+            config = get_config()
+        
+        # Create factory functions for isolated dependencies
+        def uow_factory() -> IUnitOfWork:
+            return UnitOfWorkFactory.create(
+                mode=config.wtb_storage_mode,
+                db_url=config.wtb_db_url,
+            )
+        
+        def state_adapter_factory() -> IStateAdapter:
+            if config.state_adapter_mode == "inmemory":
+                return InMemoryStateAdapter()
+            else:
+                try:
+                    from wtb.infrastructure.adapters import AgentGitStateAdapter
+                    return AgentGitStateAdapter(
+                        agentgit_db_path=config.agentgit_db_path,
+                        wtb_db_url=config.wtb_db_url,
+                    )
+                except ImportError:
+                    return InMemoryStateAdapter()
+        
+        return ThreadPoolBatchTestRunner(
+            uow_factory=uow_factory,
+            state_adapter_factory=state_adapter_factory,
+            max_workers=max_workers,
+            execution_timeout_seconds=execution_timeout_seconds,
+        )
+    
+    @staticmethod
+    def create_ray(config: Optional[WTBConfig] = None) -> IBatchTestRunner:
+        """
+        Create Ray-based batch test runner.
+        
+        Args:
+            config: WTB configuration with ray_config
+            
+        Returns:
+            RayBatchTestRunner instance
+            
+        Raises:
+            ImportError: If Ray is not installed
+        """
+        from .services.ray_batch_runner import RayBatchTestRunner, RayConfig
+        
+        if config is None:
+            config = get_config()
+        
+        ray_config = getattr(config, 'ray_config', None)
+        if ray_config is None:
+            ray_config = RayConfig.for_local_development()
+        
+        return RayBatchTestRunner(
+            config=ray_config,
+            agentgit_db_url=config.agentgit_db_path,
+            wtb_db_url=config.wtb_db_url or f"sqlite:///{config.data_dir}/wtb.db",
+        )
+    
+    @staticmethod
+    def create_for_testing(max_workers: int = 2) -> IBatchTestRunner:
+        """
+        Create batch test runner for unit tests.
+        
+        Uses in-memory storage for speed and isolation.
+        
+        Args:
+            max_workers: Maximum concurrent workers
+            
+        Returns:
+            ThreadPoolBatchTestRunner with in-memory dependencies
+        """
+        from .services.batch_test_runner import ThreadPoolBatchTestRunner
+        
+        return ThreadPoolBatchTestRunner(
+            uow_factory=lambda: InMemoryUnitOfWork(),
+            state_adapter_factory=lambda: InMemoryStateAdapter(),
+            max_workers=max_workers,
+            execution_timeout_seconds=60.0,
+        )

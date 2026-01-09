@@ -17,6 +17,7 @@ from .repositories import (
     INodeVariantRepository,
     IBatchTestRepository,
     IEvaluationResultRepository,
+    IAuditLogRepository,
     INodeBoundaryRepository,
     ICheckpointFileRepository,
     IOutboxRepository,
@@ -33,6 +34,15 @@ from .evaluator import (
     IEvaluationEngine,
     EvaluationMetric,
     EvaluationScore,
+)
+from .batch_runner import (
+    IBatchTestRunner,
+    IEnvironmentProvider,
+    BatchRunnerStatus,
+    BatchRunnerProgress,
+    BatchRunnerError,
+    BatchRunnerConfigError,
+    BatchRunnerExecutionError,
 )
 
 __all__ = [
@@ -56,6 +66,7 @@ __all__ = [
     "INodeVariantRepository",
     "IBatchTestRepository",
     "IEvaluationResultRepository",
+    "IAuditLogRepository",
     "INodeBoundaryRepository",
     "ICheckpointFileRepository",
     "IOutboxRepository",
@@ -71,4 +82,12 @@ __all__ = [
     "IEvaluationEngine",
     "EvaluationMetric",
     "EvaluationScore",
+    # Batch Runner
+    "IBatchTestRunner",
+    "IEnvironmentProvider",
+    "BatchRunnerStatus",
+    "BatchRunnerProgress",
+    "BatchRunnerError",
+    "BatchRunnerConfigError",
+    "BatchRunnerExecutionError",
 ]

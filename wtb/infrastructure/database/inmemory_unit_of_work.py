@@ -24,6 +24,7 @@ from wtb.domain.interfaces.repositories import (
     INodeBoundaryRepository,
     ICheckpointFileRepository,
     IOutboxRepository,
+    IAuditLogRepository,
 )
 from wtb.domain.models import (
     TestWorkflow,
@@ -37,6 +38,7 @@ from wtb.domain.models import (
 )
 from wtb.domain.models.batch_test import BatchTest, BatchTestStatus
 from wtb.domain.models.evaluation import EvaluationResult
+from wtb.infrastructure.events.wtb_audit_trail import WTBAuditEntry
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -432,6 +434,45 @@ class InMemoryOutboxRepository(IOutboxRepository):
         return [deepcopy(e) for e in events[:limit]]
 
 
+class InMemoryAuditLogRepository(IAuditLogRepository):
+    """In-memory audit log repository."""
+    
+    def __init__(self):
+        self._store: List[WTBAuditEntry] = []
+    
+    def get(self, id: str) -> Optional[WTBAuditEntry]:
+        # Not typically used for logs, but implemented for interface
+        return None
+    
+    def list(self, limit: int = 100, offset: int = 0) -> List[WTBAuditEntry]:
+        return [deepcopy(e) for e in self._store[offset:offset + limit]]
+    
+    def exists(self, id: str) -> bool:
+        return False
+    
+    def add(self, entity: WTBAuditEntry) -> WTBAuditEntry:
+        self._store.append(deepcopy(entity))
+        return entity
+    
+    def update(self, entity: WTBAuditEntry) -> WTBAuditEntry:
+        raise NotImplementedError("Audit logs are immutable")
+    
+    def delete(self, id: str) -> bool:
+        raise NotImplementedError("Audit logs are immutable")
+    
+    def append_logs(self, execution_id: str, logs: List[WTBAuditEntry]) -> None:
+        for log in logs:
+            if not log.execution_id:
+                log.execution_id = execution_id
+            self._store.append(deepcopy(log))
+    
+    def find_by_execution(self, execution_id: str) -> List[WTBAuditEntry]:
+        return [
+            deepcopy(e) for e in self._store 
+            if e.execution_id == execution_id
+        ]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # In-Memory Unit of Work
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -467,6 +508,7 @@ class InMemoryUnitOfWork(IUnitOfWork):
         self.node_boundaries: INodeBoundaryRepository = InMemoryNodeBoundaryRepository()
         self.checkpoint_files: ICheckpointFileRepository = InMemoryCheckpointFileRepository()
         self.outbox: IOutboxRepository = InMemoryOutboxRepository()
+        self.audit_logs: IAuditLogRepository = InMemoryAuditLogRepository()
         
         self._in_transaction = False
     
@@ -496,4 +538,5 @@ class InMemoryUnitOfWork(IUnitOfWork):
         self.node_boundaries = InMemoryNodeBoundaryRepository()
         self.checkpoint_files = InMemoryCheckpointFileRepository()
         self.outbox = InMemoryOutboxRepository()
+        self.audit_logs = InMemoryAuditLogRepository()
 

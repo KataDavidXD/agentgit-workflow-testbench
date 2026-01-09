@@ -9,7 +9,7 @@ Supports multiple deployment modes:
 - Production: PostgreSQL with full persistence
 
 Usage:
-    from wtb.config import WTBConfig
+    from wtb.config import WTBConfig, RayConfig
     
     # For testing
     config = WTBConfig.for_testing()
@@ -20,14 +20,103 @@ Usage:
     # For production
     config = WTBConfig.for_production("postgresql://user:pass@host/db")
     
+    # For production with Ray
+    config = WTBConfig.for_ray_production(
+        db_url="postgresql://...",
+        ray_address="ray://cluster:10001",
+    )
+    
     # From environment
     config = WTBConfig.from_env()
 """
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any
 from pathlib import Path
+
+
+# ═══════════════════════════════════════════════════════════════
+# Ray Configuration
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class RayConfig:
+    """
+    Ray cluster configuration for batch testing.
+    
+    Attributes:
+        ray_address: Ray cluster address ("auto" for local, or "ray://host:port")
+        num_cpus_per_task: CPU allocation per actor
+        memory_per_task_gb: Memory allocation per actor in GB
+        max_pending_tasks: Maximum concurrent tasks (backpressure)
+        max_retries: Max retries for failed tasks
+        runtime_env: Optional runtime environment specification
+        object_store_memory_gb: Object store memory allocation
+    """
+    ray_address: str = "auto"
+    num_cpus_per_task: float = 1.0
+    memory_per_task_gb: float = 2.0
+    max_pending_tasks: int = 100
+    max_retries: int = 3
+    runtime_env: Optional[Dict[str, Any]] = None
+    object_store_memory_gb: Optional[float] = None
+    
+    @classmethod
+    def for_local_development(cls) -> "RayConfig":
+        """Config for local development (single node)."""
+        return cls(
+            ray_address="auto",
+            num_cpus_per_task=1.0,
+            memory_per_task_gb=1.0,
+            max_pending_tasks=4,
+            max_retries=1,
+        )
+    
+    @classmethod
+    def for_production(
+        cls,
+        ray_address: str,
+        num_workers: int = 10,
+        memory_gb: float = 4.0,
+    ) -> "RayConfig":
+        """Config for production cluster."""
+        return cls(
+            ray_address=ray_address,
+            num_cpus_per_task=1.0,
+            memory_per_task_gb=memory_gb,
+            max_pending_tasks=num_workers * 2,
+            max_retries=3,
+        )
+    
+    @classmethod
+    def for_testing(cls) -> "RayConfig":
+        """Config for testing (minimal resources)."""
+        return cls(
+            ray_address="auto",
+            num_cpus_per_task=0.5,
+            memory_per_task_gb=0.5,
+            max_pending_tasks=2,
+            max_retries=1,
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "ray_address": self.ray_address,
+            "num_cpus_per_task": self.num_cpus_per_task,
+            "memory_per_task_gb": self.memory_per_task_gb,
+            "max_pending_tasks": self.max_pending_tasks,
+            "max_retries": self.max_retries,
+            "runtime_env": self.runtime_env,
+            "object_store_memory_gb": self.object_store_memory_gb,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════
+# WTB Configuration
+# ═══════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -41,6 +130,9 @@ class WTBConfig:
         agentgit_db_path: Path to AgentGit SQLite database
         state_adapter_mode: State adapter - "inmemory" or "agentgit"
         data_dir: Base directory for data files
+        ray_enabled: Enable Ray for batch testing
+        ray_config: Ray cluster configuration
+        environment_provider: Environment provider type ("ray", "grpc", "inprocess")
     """
     
     # Storage mode: "inmemory" or "sqlalchemy"
@@ -66,9 +158,20 @@ class WTBConfig:
     ide_sync_enabled: bool = False
     ide_sync_url: Optional[str] = None
     
+    # Ray batch testing
+    ray_enabled: bool = False
+    ray_config: Optional[RayConfig] = None
+    
+    # Environment provider
+    environment_provider: str = "inprocess"  # "ray", "grpc", "inprocess"
+    grpc_env_manager_url: Optional[str] = None
+    
     # Logging
     log_sql: bool = False
     log_level: str = "INFO"
+    
+    # SQLite WAL mode (for concurrent access)
+    sqlite_wal_mode: bool = False
     
     def __post_init__(self):
         """Set default wtb_db_url if not provided."""
@@ -202,6 +305,43 @@ class WTBConfig:
             filetracker_enabled=False,
             ide_sync_enabled=False,
             log_sql=False,
+        )
+    
+    @classmethod
+    def for_ray_production(
+        cls,
+        db_url: str,
+        ray_address: str,
+        agentgit_db_path: str = "data/agentgit.db",
+        data_dir: str = "data",
+        num_ray_workers: int = 10,
+    ) -> "WTBConfig":
+        """
+        Create config for production with Ray batch testing.
+        
+        Args:
+            db_url: PostgreSQL database URL
+            ray_address: Ray cluster address
+            agentgit_db_path: Path to AgentGit database
+            data_dir: Directory for local files
+            num_ray_workers: Number of Ray workers
+            
+        Returns:
+            WTBConfig with PostgreSQL and Ray enabled
+        """
+        return cls(
+            wtb_storage_mode="sqlalchemy",
+            wtb_db_url=db_url,
+            agentgit_db_path=agentgit_db_path,
+            state_adapter_mode="agentgit",
+            data_dir=data_dir,
+            filetracker_enabled=True,
+            ide_sync_enabled=True,
+            ray_enabled=True,
+            ray_config=RayConfig.for_production(ray_address, num_ray_workers),
+            environment_provider="ray",
+            log_sql=False,
+            log_level="WARNING",
         )
     
     def ensure_data_dir(self) -> Path:

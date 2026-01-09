@@ -3145,6 +3145,98 @@ class AuditEventSubscriber:
 
 ---
 
+### 13.5 Critical Risks & Mitigation (Event Bus & Audit)
+
+> **Reference**: See `docs/EventBus_and_Audit_Session/WTB_EVENTBUS_AUDIT_DESIGN.md` for full implementation.
+
+#### 13.5.1 Thread Safety: Inheritance over Composition
+
+**Risk**: The original `WTBEventBus` design used composition (wrapping an internal `AgentGitEventBus`). If WTB sets the global bus to `_internal_bus`, AgentGit code calling `get_global_event_bus().publish()` bypasses WTB's lock.
+
+**Solution**: `WTBEventBus` **inherits** from `AgentGitEventBus`:
+
+```python
+class WTBEventBus(AgentGitEventBus):
+    def __init__(self, max_history: int = 1000):
+        super().__init__()
+        self._max_history = max_history
+        self._lock = Lock()
+    
+    def publish(self, event: DomainEvent) -> None:
+        with self._lock:
+            super().publish(event)
+    
+    def subscribe(self, event_type, handler) -> None:
+        with self._lock:
+            super().subscribe(event_type, handler)
+```
+
+**Initialization Requirement**:
+```python
+# MUST be called before any AgentGit component publishes events
+wtb_bus = WTBEventBus()
+set_global_event_bus(wtb_bus)
+```
+
+#### 13.5.2 Memory Leak Mitigation: Audit Trail Flushing
+
+**Risk**: `WTBAuditTrail` accumulates events in memory. Long-running batch tests cause OOM.
+
+**Solution**: Add `IAuditLogRepository` to `IUnitOfWork` and implement flushing:
+
+```python
+# In IUnitOfWork
+audit_logs: IAuditLogRepository
+
+# In WTBAuditTrail
+def flush(self) -> List[WTBAuditEntry]:
+    """Clear and return entries for persistence."""
+    entries = self.entries[:]
+    self.entries.clear()
+    return entries
+```
+
+**Flush Strategy** (to be configured):
+| Trigger | Default | Notes |
+|---------|---------|-------|
+| After N events | 100 | Configurable threshold |
+| After Node completion | Yes | Natural boundary |
+| At Checkpoint creation | Yes | Ensures consistency |
+
+#### 13.5.3 Bridge Error Handling
+
+**Risk**: `AgentGitEventBus.publish()` catches and swallows exceptions. If bridge handlers fail, WTB misses events and state drifts from AgentGit.
+
+**Solution**: Bridge handlers must NOT silently fail:
+
+```python
+def _bridge_checkpoint_created(self, ag_event) -> None:
+    try:
+        wtb_event = CheckpointCreatedEvent(...)
+        self.publish(wtb_event)
+    except Exception as e:
+        # Log to critical error channel
+        import sys
+        print(f"[CRITICAL] Bridge error: {e}", file=sys.stderr)
+        # TODO: Integrate with monitoring/alerting
+        # TODO: Mark for IntegrityChecker reconciliation
+```
+
+**Future Enhancements**:
+- Publish `SystemConsistencyErrorEvent` for monitoring
+- Queue failed events for `IntegrityChecker` reconciliation
+- Integration with alerting systems
+
+#### 13.5.4 Decision Summary
+
+| Risk | Mitigation | Status |
+|------|------------|--------|
+| **Thread Safety** | Inheritance + Lock in all public methods | ✅ Designed |
+| **Memory Leak** | IAuditLogRepository + flush() | ✅ Interface added |
+| **Bridge Errors** | try/except + stderr logging | ⚠️ Minimal (needs monitoring) |
+
+---
+
 ## 14. Summary of Architecture Decisions
 
 | Question                                 | Decision                           | Rationale                                                                                                              | Validated? |
@@ -3155,6 +3247,8 @@ class AuditEventSubscriber:
 | **Event Bus for WTB?**             | ✅ Yes                             | Decouples components, enables async audit, metrics, and real-time UI updates                                           | ✅ EventBus verified |
 | **Extend AgentGit Event Bus?**     | ✅ Yes, Unified                    | Single EventBus with WTB-specific events extending DomainEvent base                                                    | ✅ Pub/sub works |
 | **Audit + Event Bus integration?** | ✅ AuditSubscriber pattern         | AuditTrail becomes an event consumer; enables persistence and correlation                                              | ✅ AuditTrail verified |
+| **EventBus Thread Safety?**        | ✅ Inheritance + Lock              | WTBEventBus inherits from AgentGitEventBus, overrides with Lock protection                                             | ✅ Designed |
+| **Audit Memory Management?**       | ✅ Flush to IAuditLogRepository    | Periodic flushing prevents OOM in long-running batch tests                                                              | ✅ Interface added |
 
 ### Key Design Principles
 
@@ -3678,4 +3772,1409 @@ class TestParallelSessionIsolation:
         ids_a = {cp.id for cp in checkpoints_a}
         ids_b = {cp.id for cp in checkpoints_b}
         assert ids_a.isdisjoint(ids_b)
+```
+
+---
+
+## 16.9 Section 16 Status: Development/Local Model
+
+> **Note**: Section 16 (ThreadPoolExecutor-based parallel sessions) is retained as the **Development/Local** implementation for:
+> - Developer experience (no Ray cluster required for local testing)
+> - Unit tests and CI pipelines
+> - Quick iteration during development
+>
+> For **Production batch testing**, use the Ray-based implementation in §18.
+
+---
+
+## 17. Architecture Review & Critique (2025-01)
+
+### 17.1 Current Design Assessment
+
+#### Strengths
+
+| Aspect | Assessment |
+|--------|------------|
+| **Separation of Concerns** | ✅ Clean layered architecture: Application → Domain → Infrastructure |
+| **Interface Abstractions** | ✅ IStateAdapter, IUnitOfWork enable testability and extensibility |
+| **Anti-Corruption Layer** | ✅ AgentGit unchanged; WTB owns semantic layer via adapters |
+| **Checkpoint Design** | ✅ Single type + node boundary pointers avoids data duplication |
+| **Testing Strategy** | ✅ InMemory implementations for fast unit tests |
+
+#### Identified Gaps & Risks
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    ARCHITECTURE GAPS & RISKS                                        │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  🔴 P0 - CRITICAL                                                                  │
+│  ────────────────                                                                  │
+│                                                                                    │
+│  1. SCALING LIMITATIONS                                                            │
+│     • ThreadPoolExecutor is process-bound (GIL limits CPU parallelism)            │
+│     • SQLite WAL mode doesn't scale beyond single-node                            │
+│     • No distributed execution support for large batch tests                       │
+│     ✅ Solved: Ray-based BatchTestRunner (§18)                                     │
+│                                                                                    │
+│  2. RESOURCE MANAGEMENT                                                            │
+│     • No explicit resource limits per parallel execution                          │
+│     • Memory not bounded for concurrent LLM calls                                  │
+│     • No backpressure mechanism for test queuing                                   │
+│     ✅ Solved: Ray @ray.remote(num_cpus=, memory=) (§18)                           │
+│                                                                                    │
+│  3. FAILURE HANDLING                                                               │
+│     • Basic try/except; no retry semantics with exponential backoff              │
+│     • No partial result persistence on batch test failure                         │
+│     • No dead-letter queue for failed executions                                   │
+│     ✅ Solved: Ray max_retries + dead-letter pattern (§18)                         │
+│                                                                                    │
+│  🟡 P1 - IMPORTANT                                                                 │
+│  ────────────────                                                                  │
+│                                                                                    │
+│  4. OBSERVABILITY                                                                  │
+│     • Event Bus is synchronous; no distributed tracing                            │
+│     • No metrics export (Prometheus, OpenTelemetry)                               │
+│     • Audit trail stored in checkpoint metadata (not queryable)                    │
+│     ⚠️ ACTION REQUIRED: Export metrics to Prometheus/Grafana (not just Ray Dashboard)
+│                                                                                    │
+│  5. STATE CONSISTENCY                                                              │
+│     • Cross-DB references via logical FKs risk orphaned records                   │
+│     • IntegrityChecker is reactive, not preventive                                │
+│     • No distributed transaction support (2PC or Saga)                            │
+│                                                                                    │
+│  6. ENVIRONMENT ISOLATION                                                          │
+│     • No sandbox/containerization for node execution                              │
+│     • Side effects (file I/O, network) not isolated between variants              │
+│     • No resource quotas per test execution                                        │
+│     ✅ Solved: IEnvironmentProvider + Ray runtime_env / gRPC service (§18.5)      │
+│                                                                                    │
+│  🟢 P2 - ENHANCEMENT                                                               │
+│  ────────────────                                                                  │
+│                                                                                    │
+│  7. EXTENSIBILITY                                                                  │
+│     • Evaluator plugin system not formalized                                       │
+│     • No webhook/callback for external integrations                               │
+│     • BatchTest comparison logic hard-coded (not pluggable)                       │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Implicit Assumptions
+
+| Assumption | Risk | Mitigation |
+|------------|------|------------|
+| Single-node deployment | Cannot scale batch tests horizontally | Ray for distributed execution |
+| SQLite sufficient for writes | Write contention at >10 concurrent sessions | PostgreSQL or Ray object store |
+| In-process execution | Resource leaks, no timeout enforcement | Ray tasks with resource limits |
+| Synchronous event handling | Blocks execution on slow handlers | Async handlers or message queue |
+| LLM calls are fast | Timeout/retry logic not robust | Configurable timeouts, circuit breaker |
+
+---
+
+## 18. Ray-Based Batch Test Runner Design
+
+### 18.1 Design Rationale
+
+#### Why Ray Instead of ThreadPoolExecutor?
+
+| Criteria | ThreadPoolExecutor | Ray | Decision |
+|----------|-------------------|-----|----------|
+| **Parallelism** | GIL-bound; limited CPU parallelism | True parallelism; distributed workers | Ray ✓ |
+| **Resource Management** | Manual; no limits per task | Declarative: `@ray.remote(num_cpus=1, memory=1GB)` | Ray ✓ |
+| **Failure Handling** | Basic exception propagation | Built-in retry, dead-letter, fault tolerance | Ray ✓ |
+| **Distributed Scaling** | Single-node only | Multi-node cluster with auto-scaling | Ray ✓ |
+| **State Management** | Shared memory; race conditions | Object store; immutable refs | Ray ✓ |
+| **Observability** | Manual instrumentation | Ray Dashboard; OpenTelemetry integration | Ray ✓ |
+| **Complexity** | Low | Medium (requires Ray cluster) | ThreadPool ✓ |
+| **Development Mode** | Simple | Local mode available | Tie |
+
+**Decision**: Use Ray for production batch testing with fallback to ThreadPoolExecutor for development/testing.
+
+### 18.2 Data Characteristics & Storage Strategy
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    DATA CHARACTERISTICS ANALYSIS                                     │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  DATA TYPE        │ LIFECYCLE   │ ACCESS    │ STORAGE        │ INDEXING            │
+│  ─────────────────┼─────────────┼───────────┼────────────────┼────────────────────│
+│  BatchTest Config │ Ephemeral   │ Read-once │ Ray ObjectRef  │ None (in-memory)   │
+│  Workflow Def     │ Long-lived  │ Read-many │ PostgreSQL     │ B-Tree (id)        │
+│  Execution State  │ Session     │ R/W       │ Checkpoint     │ B-Tree (session)   │
+│  Checkpoint Data  │ Persistent  │ Append    │ AgentGit DB    │ B-Tree (session+id)│
+│  Node Boundary    │ Persistent  │ Append    │ WTB DB         │ B-Tree (execution) │
+│  Test Results     │ Persistent  │ Append    │ WTB DB         │ B-Tree (batch_id)  │
+│  Comparison Matrix│ Ephemeral   │ Read-once │ Ray ObjectRef  │ None               │
+│  Audit Events     │ Persistent  │ Append    │ TimescaleDB*   │ BRIN (timestamp)   │
+│  Metrics/Telemetry│ Time-series │ Append    │ Prometheus     │ LSM (time-based)   │
+│                                                                                    │
+│  * TimescaleDB for audit events is optional; default is PostgreSQL with           │
+│    partitioning by time for efficient range queries.                               │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+STORAGE DECISION RATIONALE:
+═══════════════════════════
+
+1. CHECKPOINTS (AgentGit SQLite → PostgreSQL for production)
+   • Row-based: Each checkpoint is a discrete entity with JSON blob
+   • B-Tree index on (internal_session_id, id): Supports rollback queries
+   • Transaction: Snapshot isolation for consistent reads during rollback
+   • Why not LSM: Random access by ID required; LSM optimized for sequential
+
+2. BATCH TEST RESULTS (WTB PostgreSQL)
+   • Row-based: Structured comparison data
+   • B-Tree on (batch_test_id): Query all results for a batch
+   • JSONB for metrics: Schema-flexible; GIN index for metric queries
+   • Append-only semantics: Results never updated after creation
+
+3. AUDIT EVENTS (PostgreSQL with time partitioning OR TimescaleDB)
+   • Time-series: Natural ordering by timestamp
+   • BRIN index on timestamp: Efficient for time-range queries
+   • Partitioning by day/week: Fast archival and queries
+   • Why BRIN over B-Tree: 90%+ smaller index for sequential inserts
+
+4. RAY OBJECT STORE (for ephemeral data)
+   • Plasma store: Zero-copy sharing between workers
+   • ObjectRef: Immutable reference; automatic cleanup
+   • Use for: Workflow configs, initial states, comparison matrices
+```
+
+### 18.3 Batch Test Runner Architecture with Ray
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    RAY-BASED BATCH TEST RUNNER ARCHITECTURE                          │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │                         WTB API Layer                                         │ │
+│  │  POST /api/batch-tests → BatchTestController → RayBatchTestRunner            │ │
+│  └───────────────────────────────────────────┬──────────────────────────────────┘ │
+│                                              │                                     │
+│                                              ▼                                     │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │                    RayBatchTestRunner (Orchestrator)                          │ │
+│  │                                                                               │ │
+│  │  Responsibilities:                                                            │ │
+│  │  ├── Submit Ray tasks for each variant combination                           │ │
+│  │  ├── Manage backpressure (max concurrent tasks)                              │ │
+│  │  ├── Aggregate results from Ray ObjectRefs                                   │ │
+│  │  ├── Handle failures with retry/dead-letter                                  │ │
+│  │  └── Persist final results to WTB database                                   │ │
+│  │                                                                               │ │
+│  │  ┌─────────────────────────────────────────────────────────────────────────┐ │ │
+│  │  │  for combination in variant_combinations:                                │ │ │
+│  │  │      object_ref = run_variant_task.remote(                               │ │ │
+│  │  │          workflow_ref=workflow_ref,    # ObjectRef (immutable)           │ │ │
+│  │  │          combination=combination,                                        │ │ │
+│  │  │          initial_state_ref=state_ref,  # ObjectRef (immutable)           │ │ │
+│  │  │      )                                                                   │ │ │
+│  │  │      pending_refs.append(object_ref)                                     │ │ │
+│  │  └─────────────────────────────────────────────────────────────────────────┘ │ │
+│  └───────────────────────────────────────────┬──────────────────────────────────┘ │
+│                                              │                                     │
+│          ┌───────────────────────────────────┼───────────────────────────────┐    │
+│          │                                   │                               │    │
+│          ▼                                   ▼                               ▼    │
+│  ┌───────────────────┐          ┌───────────────────┐          ┌───────────────────┐
+│  │ Ray Worker Node 1 │          │ Ray Worker Node 2 │          │ Ray Worker Node N │
+│  │                   │          │                   │          │                   │
+│  │ @ray.remote(      │          │ @ray.remote(      │          │ @ray.remote(      │
+│  │   num_cpus=1,     │          │   num_cpus=1,     │          │   num_cpus=1,     │
+│  │   memory=2GB,     │          │   memory=2GB,     │          │   memory=2GB,     │
+│  │   max_retries=3)  │          │   max_retries=3)  │          │   max_retries=3)  │
+│  │                   │          │                   │          │                   │
+│  │ run_variant_task: │          │ run_variant_task: │          │ run_variant_task: │
+│  │ ├── Create ctx    │          │ ├── Create ctx    │          │ ├── Create ctx    │
+│  │ ├── Apply variant │          │ ├── Apply variant │          │ ├── Apply variant │
+│  │ ├── Run workflow  │          │ ├── Run workflow  │          │ ├── Run workflow  │
+│  │ ├── Save results  │          │ ├── Save results  │          │ ├── Save results  │
+│  │ └── Return ref    │          │ └── Return ref    │          │ └── Return ref    │
+│  └─────────┬─────────┘          └─────────┬─────────┘          └─────────┬─────────┘
+│            │                              │                              │         │
+│            └──────────────────────────────┼──────────────────────────────┘         │
+│                                           ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │                         Ray Object Store (Plasma)                             │ │
+│  │                                                                               │ │
+│  │  ObjectRef<Workflow>    ObjectRef<InitialState>    ObjectRef<BatchTestResult>│ │
+│  │                                                                               │ │
+│  │  • Zero-copy sharing between workers                                         │ │
+│  │  • Automatic distributed memory management                                   │ │
+│  │  • Immutable references prevent race conditions                              │ │
+│  └──────────────────────────────────────────────────────────────────────────────┘ │
+│                                           │                                         │
+│                                           ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │                         Persistent Storage                                    │ │
+│  │                                                                               │ │
+│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐                  │ │
+│  │  │  AgentGit DB   │  │    WTB DB      │  │  FileTracker   │                  │ │
+│  │  │  (PostgreSQL)  │  │  (PostgreSQL)  │  │  (PostgreSQL)  │                  │ │
+│  │  │                │  │                │  │                │                  │ │
+│  │  │  checkpoints   │  │  batch_tests   │  │  commits       │                  │ │
+│  │  │  sessions      │  │  executions    │  │  file_blobs    │                  │ │
+│  │  └────────────────┘  └────────────────┘  └────────────────┘                  │ │
+│  └──────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.4 Ray Task Design
+
+```python
+# wtb/application/services/ray_batch_runner.py
+
+import ray
+from ray import ObjectRef
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RayBatchTestConfig:
+    """Configuration for Ray-based batch testing."""
+    
+    # Ray resource allocation per task
+    num_cpus_per_task: float = 1.0
+    memory_per_task_gb: float = 2.0
+    
+    # Retry semantics
+    max_retries: int = 3
+    retry_exceptions: bool = True
+    
+    # Backpressure
+    max_pending_tasks: int = 100
+    
+    # Timeouts (seconds)
+    task_timeout: int = 3600  # 1 hour
+    result_timeout: int = 60
+    
+    # Environment
+    runtime_env: Optional[Dict[str, Any]] = None
+
+
+@ray.remote
+class VariantExecutionActor:
+    """
+    Ray Actor for executing workflow variants.
+    
+    Using Actor (vs Task) because:
+    1. Reuses database connections across executions
+    2. Maintains tool manager state
+    3. Better resource utilization for sequential operations
+    """
+    
+    def __init__(
+        self,
+        agentgit_db_url: str,
+        wtb_db_url: str,
+    ):
+        """Initialize actor with database connections."""
+        # Lazy import to avoid serialization issues
+        from wtb.infrastructure.adapters.agentgit_state_adapter import AgentGitStateAdapter
+        from wtb.infrastructure.database.factory import UnitOfWorkFactory
+        from wtb.application.services.execution_controller import ExecutionController
+        
+        self._agentgit_db_url = agentgit_db_url
+        self._wtb_db_url = wtb_db_url
+        
+        # Initialize once, reuse across tasks
+        self._state_adapter = AgentGitStateAdapter(
+            agentgit_db_path=agentgit_db_url,
+            wtb_db_url=wtb_db_url,
+        )
+        self._uow_factory = UnitOfWorkFactory
+    
+    def execute_variant(
+        self,
+        workflow: Dict[str, Any],  # Serialized workflow
+        combination: Dict[str, str],  # node_id → variant_id
+        initial_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Execute a single variant combination.
+        
+        Returns serializable result dict for Ray ObjectRef.
+        """
+        from wtb.domain.models import TestWorkflow, Execution
+        from wtb.application.services.execution_controller import ExecutionController
+        from wtb.application.services.node_replacer import NodeReplacer
+        
+        start_time = datetime.now()
+        
+        try:
+            # Deserialize workflow
+            test_workflow = TestWorkflow.from_dict(workflow)
+            
+            # Create fresh UoW for this execution
+            uow = self._uow_factory.create(
+                mode="sqlalchemy",
+                db_url=self._wtb_db_url
+            )
+            
+            with uow:
+                # Apply variants
+                replacer = NodeReplacer(
+                    variant_repository=uow.variants,
+                )
+                modified_workflow = test_workflow.copy()
+                for node_id, variant_id in combination.items():
+                    modified_workflow = replacer.apply_variant(
+                        modified_workflow, node_id, variant_id
+                    )
+                
+                # Create controller with fresh adapter state
+                controller = ExecutionController(
+                    execution_repository=uow.executions,
+                    workflow_repository=uow.workflows,
+                    state_adapter=self._state_adapter,
+                )
+                
+                # Initialize and run
+                self._state_adapter.reset_session()  # Ensure clean state
+                execution = controller.create_execution(
+                    workflow=modified_workflow,
+                    initial_state=initial_state,
+                )
+                
+                result_execution = controller.run(execution.id)
+                uow.commit()
+                
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                
+                return {
+                    "success": result_execution.status == "completed",
+                    "execution_id": execution.id,
+                    "combination": combination,
+                    "duration_ms": duration_ms,
+                    "final_state": result_execution.final_state,
+                    "nodes_executed": result_execution.nodes_executed,
+                    "error": None,
+                }
+                
+        except Exception as e:
+            logger.exception(f"Variant execution failed: {combination}")
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            return {
+                "success": False,
+                "execution_id": None,
+                "combination": combination,
+                "duration_ms": duration_ms,
+                "final_state": None,
+                "nodes_executed": 0,
+                "error": str(e),
+            }
+
+
+class RayBatchTestRunner:
+    """
+    Orchestrates batch test execution using Ray.
+    
+    Key Design Decisions:
+    =====================
+    
+    1. ACTOR POOL vs TASKS
+       Using ActorPool for database connection reuse.
+       Tasks would create new connections per invocation.
+    
+    2. BACKPRESSURE
+       max_pending_tasks limits concurrent Ray tasks.
+       Uses ray.wait() to process results as they complete.
+    
+    3. FAULT TOLERANCE
+       max_retries handles transient failures.
+       Dead-letter pattern for permanent failures.
+    
+    4. RESOURCE ISOLATION
+       Each actor gets dedicated CPU/memory allocation.
+       Prevents noisy neighbor issues.
+    """
+    
+    def __init__(
+        self,
+        config: RayBatchTestConfig,
+        agentgit_db_url: str,
+        wtb_db_url: str,
+    ):
+        self._config = config
+        self._agentgit_db_url = agentgit_db_url
+        self._wtb_db_url = wtb_db_url
+        
+        # Actor pool for connection reuse
+        self._actor_pool: Optional[ray.util.ActorPool] = None
+    
+    def _ensure_actor_pool(self, num_workers: int) -> None:
+        """Create or resize actor pool."""
+        if self._actor_pool is None:
+            actors = [
+                VariantExecutionActor.options(
+                    num_cpus=self._config.num_cpus_per_task,
+                    memory=int(self._config.memory_per_task_gb * 1024 * 1024 * 1024),
+                    max_restarts=self._config.max_retries,
+                ).remote(
+                    agentgit_db_url=self._agentgit_db_url,
+                    wtb_db_url=self._wtb_db_url,
+                )
+                for _ in range(num_workers)
+            ]
+            self._actor_pool = ray.util.ActorPool(actors)
+    
+    def run_batch_test(
+        self,
+        batch_test: "BatchTest",
+    ) -> "BatchTest":
+        """
+        Execute batch test with Ray parallelism.
+        
+        Flow:
+        1. Put workflow and initial_state in Ray object store
+        2. Create actor pool for variant executions
+        3. Submit all variants with backpressure
+        4. Aggregate results as they complete
+        5. Build comparison matrix
+        """
+        from wtb.domain.models import BatchTestResult
+        
+        batch_test.start()
+        
+        try:
+            # Determine parallelism
+            num_workers = min(
+                batch_test.parallel_count,
+                len(batch_test.variant_combinations),
+                self._config.max_pending_tasks,
+            )
+            
+            self._ensure_actor_pool(num_workers)
+            
+            # Put immutable data in object store
+            workflow_ref = ray.put(batch_test.workflow.to_dict())
+            initial_state_ref = ray.put(batch_test.initial_state)
+            
+            # Submit all variants to actor pool
+            results = list(self._actor_pool.map(
+                lambda actor, combo: actor.execute_variant.remote(
+                    workflow=ray.get(workflow_ref),
+                    combination=combo,
+                    initial_state=ray.get(initial_state_ref),
+                ),
+                batch_test.variant_combinations,
+            ))
+            
+            # Process results
+            for result in results:
+                batch_test.add_result(BatchTestResult(
+                    combination_name=str(result["combination"]),
+                    execution_id=result["execution_id"] or "",
+                    success=result["success"],
+                    duration_ms=result["duration_ms"],
+                    error_message=result["error"],
+                    metrics=result.get("metrics", {}),
+                ))
+            
+            batch_test.complete()
+            batch_test.build_comparison_matrix()
+            
+        except Exception as e:
+            logger.exception("Batch test failed")
+            batch_test.fail(str(e))
+        
+        return batch_test
+    
+    def shutdown(self) -> None:
+        """Cleanup actor pool."""
+        if self._actor_pool:
+            # Actors will be garbage collected
+            self._actor_pool = None
+```
+
+### 18.5 Environment Management Integration
+
+#### Decision: Adapt Existing Service (Not Reuse As-Is)
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    ENVIRONMENT MANAGEMENT INTEGRATION DECISION                       │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  EXISTING COMPONENT: Mini Environment Manager (REST + gRPC)                        │
+│  ────────────────────────────────────────────────────────                          │
+│                                                                                    │
+│  DECISION: ADAPT (via interface abstraction)                                       │
+│                                                                                    │
+│  RATIONALE:                                                                        │
+│  ──────────                                                                        │
+│                                                                                    │
+│  ✅ REUSE aspects:                                                                 │
+│  • Environment isolation primitives (container/process management)                 │
+│  • Resource allocation logic                                                       │
+│  • gRPC interface for efficient Ray worker communication                          │
+│                                                                                    │
+│  ❌ DO NOT reuse as-is:                                                            │
+│  • REST interface adds latency for high-frequency calls from Ray workers          │
+│  • May not be Ray-native (no ObjectRef support)                                   │
+│  • Unclear transaction boundaries with WTB's checkpoint system                    │
+│                                                                                    │
+│  📐 ADAPTATION PATTERN:                                                            │
+│  ──────────────────────                                                            │
+│                                                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐  │
+│  │                        IEnvironmentProvider (WTB Interface)                  │  │
+│  │                                                                              │  │
+│  │  • create_environment(config) → EnvironmentHandle                           │  │
+│  │  • destroy_environment(handle) → bool                                        │  │
+│  │  • execute_in_environment(handle, callable) → Result                        │  │
+│  │  • get_environment_status(handle) → EnvironmentStatus                       │  │
+│  └──────────────────────────────────┬──────────────────────────────────────────┘  │
+│                                     │                                              │
+│           ┌─────────────────────────┼─────────────────────────────┐               │
+│           │                         │                             │               │
+│           ▼                         ▼                             ▼               │
+│  ┌─────────────────┐    ┌─────────────────────────┐    ┌─────────────────────┐   │
+│  │  InProcess      │    │  GrpcEnvironment        │    │  RayEnvironment     │   │
+│  │  Provider       │    │  Provider               │    │  Provider           │   │
+│  │                 │    │                         │    │                     │   │
+│  │  For testing    │    │  Wraps existing         │    │  Native Ray         │   │
+│  │  (no isolation) │    │  env-manager gRPC       │    │  runtime_env        │   │
+│  │                 │    │  service                │    │                     │   │
+│  └─────────────────┘    └─────────────────────────┘    └─────────────────────┘   │
+│                                                                                    │
+│  INTEGRATION WITH RAY:                                                             │
+│  ─────────────────────                                                             │
+│                                                                                    │
+│  Option A: Ray runtime_env (RECOMMENDED for most cases)                            │
+│  • Ray has built-in environment isolation via runtime_env                          │
+│  • Supports pip packages, env vars, working_dir per task                          │
+│  • No external service dependency                                                  │
+│                                                                                    │
+│  Option B: gRPC Environment Provider (for complex isolation)                       │
+│  • Use when: containerized isolation required (Docker/K8s)                        │
+│  • Use when: existing env-manager has specialized capabilities                    │
+│  • Latency: gRPC call per environment creation (~10-50ms)                         │
+│                                                                                    │
+│  RECOMMENDED APPROACH:                                                             │
+│  ─────────────────────                                                             │
+│                                                                                    │
+│  1. Default to RayEnvironmentProvider (Ray runtime_env)                           │
+│  2. IEnvironmentProvider interface allows future integration                      │
+│  3. GrpcEnvironmentProvider as optional adapter for existing service              │
+│  4. Evaluate container-level isolation only if side-effect isolation required     │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### IEnvironmentProvider Interface
+
+```python
+# wtb/domain/interfaces/environment_provider.py
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, TypeVar
+from enum import Enum
+
+T = TypeVar('T')
+
+
+class EnvironmentStatus(Enum):
+    """Environment lifecycle states."""
+    CREATING = "creating"
+    READY = "ready"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+
+@dataclass
+class EnvironmentConfig:
+    """Configuration for environment creation."""
+    
+    # Resource limits
+    num_cpus: float = 1.0
+    memory_gb: float = 2.0
+    
+    # Python environment
+    pip_packages: Optional[List[str]] = None
+    env_vars: Optional[Dict[str, str]] = None
+    working_dir: Optional[str] = None
+    
+    # Isolation level
+    container_image: Optional[str] = None  # For container-based isolation
+    network_isolation: bool = False
+    filesystem_isolation: bool = False
+    
+    # Timeouts
+    creation_timeout_seconds: int = 60
+    execution_timeout_seconds: int = 3600
+
+
+@dataclass
+class EnvironmentHandle:
+    """Handle to a created environment."""
+    
+    id: str
+    status: EnvironmentStatus
+    config: EnvironmentConfig
+    metadata: Dict[str, Any]
+
+
+class IEnvironmentProvider(ABC):
+    """
+    Interface for environment management.
+    
+    Implementations:
+    - InProcessProvider: No isolation, for testing
+    - RayEnvironmentProvider: Ray runtime_env, for production
+    - GrpcEnvironmentProvider: Wraps external env-manager service
+    """
+    
+    @abstractmethod
+    def create_environment(
+        self,
+        config: EnvironmentConfig,
+    ) -> EnvironmentHandle:
+        """Create and initialize an isolated environment."""
+        pass
+    
+    @abstractmethod
+    def execute_in_environment(
+        self,
+        handle: EnvironmentHandle,
+        func: Callable[..., T],
+        *args,
+        **kwargs,
+    ) -> T:
+        """Execute a callable in the isolated environment."""
+        pass
+    
+    @abstractmethod
+    def destroy_environment(
+        self,
+        handle: EnvironmentHandle,
+    ) -> bool:
+        """Destroy and cleanup environment resources."""
+        pass
+    
+    @abstractmethod
+    def get_status(
+        self,
+        handle: EnvironmentHandle,
+    ) -> EnvironmentStatus:
+        """Get current environment status."""
+        pass
+
+
+class RayEnvironmentProvider(IEnvironmentProvider):
+    """
+    Environment provider using Ray runtime_env.
+    
+    This is the recommended provider for production use:
+    - Native Ray integration
+    - No external service dependency
+    - Efficient resource management
+    """
+    
+    def create_environment(
+        self,
+        config: EnvironmentConfig,
+    ) -> EnvironmentHandle:
+        """Create Ray runtime environment config."""
+        import uuid
+        
+        runtime_env = {}
+        
+        if config.pip_packages:
+            runtime_env["pip"] = config.pip_packages
+        
+        if config.env_vars:
+            runtime_env["env_vars"] = config.env_vars
+        
+        if config.working_dir:
+            runtime_env["working_dir"] = config.working_dir
+        
+        handle = EnvironmentHandle(
+            id=str(uuid.uuid4()),
+            status=EnvironmentStatus.READY,
+            config=config,
+            metadata={"runtime_env": runtime_env},
+        )
+        
+        return handle
+    
+    def execute_in_environment(
+        self,
+        handle: EnvironmentHandle,
+        func: Callable[..., T],
+        *args,
+        **kwargs,
+    ) -> T:
+        """Execute function as Ray task with runtime_env."""
+        import ray
+        
+        runtime_env = handle.metadata.get("runtime_env", {})
+        
+        @ray.remote(
+            num_cpus=handle.config.num_cpus,
+            memory=int(handle.config.memory_gb * 1024 * 1024 * 1024),
+            runtime_env=runtime_env,
+        )
+        def _execute(*args, **kwargs):
+            return func(*args, **kwargs)
+        
+        return ray.get(_execute.remote(*args, **kwargs))
+    
+    def destroy_environment(
+        self,
+        handle: EnvironmentHandle,
+    ) -> bool:
+        """Ray handles cleanup automatically."""
+        handle.status = EnvironmentStatus.STOPPED
+        return True
+    
+    def get_status(
+        self,
+        handle: EnvironmentHandle,
+    ) -> EnvironmentStatus:
+        return handle.status
+```
+
+### 18.5.1 gRPC Environment Provider (Colleague's Service)
+
+> **Note**: A colleague has implemented a mini environment-management service supporting both RESTful and gRPC interfaces.
+
+```python
+# wtb/infrastructure/environment/grpc_environment_provider.py
+
+from typing import Optional, List, Dict, Any
+import grpc
+
+class GrpcEnvironmentProvider(IEnvironmentProvider):
+    """
+    Environment provider that wraps colleague's gRPC environment-manager service.
+    
+    Use when:
+    - Container-level isolation required (Docker/K8s)
+    - Shared environment pool across services
+    - Existing infra investment in env-manager
+    
+    Integration Pattern:
+    - WTB creates environments via gRPC call
+    - Environment manager provisions isolated container/process
+    - Execution runs in isolated environment
+    - Cleanup via gRPC destroy call
+    """
+    
+    def __init__(
+        self,
+        grpc_address: str = "localhost:50051",
+        timeout_seconds: int = 60,
+    ):
+        self._channel = grpc.insecure_channel(grpc_address)
+        # Import generated protobuf stubs
+        # from env_manager_pb2_grpc import EnvironmentManagerStub
+        # self._stub = EnvironmentManagerStub(self._channel)
+        self._timeout = timeout_seconds
+    
+    def create_environment(
+        self,
+        config: EnvironmentConfig,
+    ) -> EnvironmentHandle:
+        """Create environment via gRPC call to env-manager."""
+        # request = CreateEnvironmentRequest(
+        #     num_cpus=config.num_cpus,
+        #     memory_gb=config.memory_gb,
+        #     pip_packages=config.pip_packages or [],
+        #     env_vars=config.env_vars or {},
+        #     container_image=config.container_image,
+        # )
+        # response = self._stub.CreateEnvironment(request, timeout=self._timeout)
+        # 
+        # return EnvironmentHandle(
+        #     id=response.environment_id,
+        #     status=EnvironmentStatus.READY,
+        #     config=config,
+        #     metadata={"grpc_handle": response.handle},
+        # )
+        raise NotImplementedError("Requires env-manager protobuf stubs")
+    
+    def execute_in_environment(
+        self,
+        handle: EnvironmentHandle,
+        func: Callable[..., T],
+        *args,
+        **kwargs,
+    ) -> T:
+        """
+        Execute function in gRPC-managed environment.
+        
+        NOTE: For remote execution, func must be serializable.
+        Consider using cloudpickle or defining execution protocol.
+        """
+        # Option 1: Execute locally with env vars set by gRPC service
+        # Option 2: Send serialized callable to remote executor
+        raise NotImplementedError("Define execution protocol with env-manager team")
+    
+    def destroy_environment(
+        self,
+        handle: EnvironmentHandle,
+    ) -> bool:
+        """Destroy environment via gRPC call."""
+        # request = DestroyEnvironmentRequest(environment_id=handle.id)
+        # response = self._stub.DestroyEnvironment(request)
+        # return response.success
+        raise NotImplementedError("Requires env-manager protobuf stubs")
+    
+    def get_status(
+        self,
+        handle: EnvironmentHandle,
+    ) -> EnvironmentStatus:
+        """Query environment status via gRPC."""
+        # request = GetStatusRequest(environment_id=handle.id)
+        # response = self._stub.GetStatus(request)
+        # return EnvironmentStatus(response.status)
+        return handle.status
+```
+
+**Integration Decision**:
+- **Default**: `RayEnvironmentProvider` (no external dependency)
+- **Optional**: `GrpcEnvironmentProvider` when container isolation needed
+- **Configuration**: `WTBConfig.environment_provider = "ray" | "grpc"`
+
+---
+
+### 18.5.2 Critical Risk: Database Connection Storm
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    ⚠️ CRITICAL: DATABASE CONNECTION STORM                           │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  RISK: With VariantExecutionActor, scaling to 100 Ray actors opens 100+ database  │
+│        connections to PostgreSQL/AgentGit.                                         │
+│                                                                                    │
+│  IMPACT:                                                                           │
+│  • PostgreSQL default max_connections = 100                                       │
+│  • Connection exhaustion causes immediate failures                                │
+│  • Database becomes the new bottleneck (Ray scales compute, not DB)               │
+│                                                                                    │
+│  SOLUTION: Connection Pooling with PgBouncer                                       │
+│  ═══════════════════════════════════════════                                      │
+│                                                                                    │
+│  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐          │
+│  │  Ray Actor 1     │────►│                  │     │                  │          │
+│  │  Ray Actor 2     │────►│   PgBouncer      │────►│   PostgreSQL     │          │
+│  │  ...             │────►│   (Connection    │     │   (max_conn=100) │          │
+│  │  Ray Actor 100   │────►│    Pooling)      │     │                  │          │
+│  └──────────────────┘     └──────────────────┘     └──────────────────┘          │
+│                                                                                    │
+│  PgBouncer Configuration:                                                         │
+│  ────────────────────────                                                         │
+│  pool_mode = transaction    # Release connection after each transaction           │
+│  max_client_conn = 1000     # Accept up to 1000 actor connections                │
+│  default_pool_size = 20     # Multiplex to 20 real DB connections                │
+│                                                                                    │
+│  WTB Configuration:                                                               │
+│  ──────────────────                                                               │
+│  wtb_db_url = "postgresql://user:pass@pgbouncer:6432/wtb"  # PgBouncer port      │
+│                                                                                    │
+│  Alternative for SQLite (AgentGit):                                               │
+│  ──────────────────────────────────                                               │
+│  • Use SQLite in WAL mode with busy_timeout                                       │
+│  • Limit concurrent actors writing to same DB                                     │
+│  • Consider PostgreSQL for AgentGit in production cluster scenarios              │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 18.5.3 Observability Requirements
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    OBSERVABILITY: Beyond Ray Dashboard                              │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  Ray Dashboard provides real-time monitoring, but we need PERSISTENT METRICS      │
+│  for historical analysis, alerting, and capacity planning.                        │
+│                                                                                    │
+│  REQUIRED EXPORTS:                                                                 │
+│  ═════════════════                                                                │
+│                                                                                    │
+│  1. Prometheus Metrics (wtb/infrastructure/observability/metrics.py)              │
+│     • wtb_batch_test_duration_seconds (histogram)                                 │
+│     • wtb_variant_execution_duration_seconds (histogram)                          │
+│     • wtb_batch_test_success_total (counter)                                      │
+│     • wtb_batch_test_failure_total (counter)                                      │
+│     • wtb_active_ray_actors (gauge)                                               │
+│     • wtb_db_connection_pool_size (gauge)                                         │
+│                                                                                    │
+│  2. Distributed Tracing (OpenTelemetry)                                           │
+│     • Trace ID propagation from API → Ray Actor → DB                             │
+│     • Span for each: batch_test, variant_execution, node_execution                │
+│                                                                                    │
+│  3. Structured Logging                                                            │
+│     • JSON logs with correlation_id for aggregation                               │
+│     • Export to ELK/Loki for centralized search                                   │
+│                                                                                    │
+│  INTEGRATION POINT:                                                                │
+│  ══════════════════                                                               │
+│                                                                                    │
+│  RayBatchTestRunner should emit metrics at:                                       │
+│  • Batch start/end                                                                │
+│  • Each variant submission                                                         │
+│  • Each variant completion (success/failure)                                      │
+│  • Comparison matrix computation                                                   │
+│                                                                                    │
+│  Example:                                                                          │
+│  from prometheus_client import Histogram, Counter                                  │
+│                                                                                    │
+│  BATCH_DURATION = Histogram('wtb_batch_test_duration_seconds', 'Batch duration')  │
+│  VARIANT_SUCCESS = Counter('wtb_variant_success_total', 'Successful variants')    │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 18.6 Transaction Boundaries & Consistency
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    TRANSACTION BOUNDARIES IN RAY BATCH TESTING                       │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  CHALLENGE: Distributed workers writing to shared databases                        │
+│  ──────────                                                                        │
+│                                                                                    │
+│  Worker 1 ─────────────┐                                                           │
+│  Worker 2 ─────────────┼──────► PostgreSQL (WTB DB)                               │
+│  Worker N ─────────────┘                                                           │
+│                                                                                    │
+│  STRATEGY: Per-Execution Transactions + Eventual Consistency for Aggregates       │
+│  ─────────                                                                         │
+│                                                                                    │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │  TRANSACTION BOUNDARY: Single Variant Execution                               │ │
+│  │                                                                               │ │
+│  │  BEGIN TRANSACTION                                                            │ │
+│  │  ├── Create Execution record                                                  │ │
+│  │  ├── For each node:                                                           │ │
+│  │  │   ├── Create checkpoint (AgentGit)                                        │ │
+│  │  │   ├── Update node_boundary (WTB)                                          │ │
+│  │  │   └── Outbox event (for cross-DB sync)                                    │ │
+│  │  ├── Create BatchTestResult record                                            │ │
+│  │  └── Process outbox (sync to AgentGit)                                       │ │
+│  │  COMMIT                                                                       │ │
+│  └──────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                    │
+│  CONSISTENCY GUARANTEES:                                                           │
+│  ───────────────────────                                                           │
+│                                                                                    │
+│  | Data Type          | Consistency  | Notes                                     │
+│  |--------------------|--------------|-------------------------------------------|
+│  | Single Execution   | Strong       | ACID within single worker                |
+│  | Batch Test Results | Eventual     | Aggregated after all workers complete    |
+│  | Comparison Matrix  | Eventual     | Computed from finalized results          |
+│  | Cross-DB (AgentGit)| Eventual     | Outbox pattern ensures delivery          |
+│                                                                                    │
+│  FAILURE HANDLING:                                                                 │
+│  ─────────────────                                                                 │
+│                                                                                    │
+│  1. Worker Crash:                                                                  │
+│     • Ray restarts worker (max_retries)                                           │
+│     • Uncommitted transactions roll back automatically                            │
+│     • Retry executes fresh (idempotent via execution_id check)                    │
+│                                                                                    │
+│  2. Partial Batch Failure:                                                         │
+│     • Failed variants recorded with error details                                 │
+│     • Successful variants retained                                                │
+│     • Batch marked "completed_with_errors"                                        │
+│                                                                                    │
+│  3. Database Unavailable:                                                          │
+│     • Workers retry with exponential backoff                                      │
+│     • Circuit breaker prevents cascade failure                                     │
+│     • Dead-letter queue for persistent failures                                   │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.7 Indexing Strategy Update
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    INDEXING STRATEGY FOR RAY BATCH TESTING                          │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  NEW TABLES / INDEXES FOR BATCH TESTING:                                          │
+│                                                                                    │
+│  wtb_batch_tests                                                                   │
+│  ├── PK: id (UUID)                                                                │
+│  ├── IDX: workflow_id (B-Tree) - Query batches by workflow                        │
+│  ├── IDX: status (B-Tree) - Filter active/completed batches                       │
+│  ├── IDX: created_at (B-Tree) - Time-range queries                                │
+│  └── IDX: (workflow_id, status) (Composite) - Common query pattern                │
+│                                                                                    │
+│  wtb_batch_test_results                                                           │
+│  ├── PK: id (UUID)                                                                │
+│  ├── FK: batch_test_id → wtb_batch_tests.id                                      │
+│  ├── FK: execution_id → wtb_executions.id                                        │
+│  ├── IDX: batch_test_id (B-Tree) - Get all results for batch                      │
+│  ├── IDX: (batch_test_id, success) (Composite) - Filter failed results            │
+│  └── IDX: metrics (GIN on JSONB) - Query by metric values                         │
+│                                                                                    │
+│  INDEX TYPE RATIONALE:                                                             │
+│  ─────────────────────                                                             │
+│                                                                                    │
+│  | Column Type        | Index Type | Rationale                                    |
+│  |--------------------|------------|----------------------------------------------|
+│  | UUID PK            | B-Tree     | Point lookups, range scans                  |
+│  | Status (enum)      | B-Tree     | Low cardinality, but selective for active   |
+│  | Timestamp          | B-Tree     | Range queries (BRIN if append-only)         |
+│  | JSONB metrics      | GIN        | Contains/exists queries on nested keys      |
+│  | Foreign Keys       | B-Tree     | Join performance                            |
+│                                                                                    │
+│  PARTITION STRATEGY (for high-volume):                                            │
+│  ─────────────────────────────────────                                            │
+│                                                                                    │
+│  wtb_batch_test_results partitioned by RANGE (created_at):                        │
+│  • p_2025_01, p_2025_02, ... (monthly partitions)                                 │
+│  • Enables efficient archival of old results                                      │
+│  • Partition pruning for time-range queries                                       │
+│                                                                                    │
+│  ESTIMATED SIZES (for capacity planning):                                         │
+│  ─────────────────────────────────────────                                        │
+│                                                                                    │
+│  Assumptions: 100 batch tests/day, 20 variants each, 30-day retention             │
+│                                                                                    │
+│  | Table                    | Rows/day | Row Size | Daily Size | 30-day Size  |
+│  |--------------------------|----------|----------|------------|--------------|
+│  | wtb_batch_tests          | 100      | 1 KB     | 100 KB     | 3 MB         |
+│  | wtb_batch_test_results   | 2,000    | 2 KB     | 4 MB       | 120 MB       |
+│  | wtb_executions           | 2,000    | 0.5 KB   | 1 MB       | 30 MB        |
+│  | checkpoints (per exec)   | 20,000   | 5 KB     | 100 MB     | 3 GB         |
+│                                                                                    │
+│  Index overhead: ~30% of table size                                               │
+│  Total estimate: ~5 GB for 30-day active data                                     │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.8 Configuration & Deployment Modes
+
+```python
+# wtb/config.py (additions)
+
+@dataclass
+class RayConfig:
+    """Ray-specific configuration."""
+    
+    # Cluster connection
+    ray_address: Optional[str] = None  # None = local mode
+    ray_namespace: str = "wtb"
+    
+    # Resource defaults
+    default_num_cpus: float = 1.0
+    default_memory_gb: float = 2.0
+    
+    # Pool sizing
+    min_actors: int = 1
+    max_actors: int = 10
+    
+    # Fault tolerance
+    max_retries: int = 3
+    actor_max_restarts: int = 3
+    
+    # Timeouts
+    task_timeout_seconds: int = 3600
+    actor_creation_timeout_seconds: int = 60
+    
+    @classmethod
+    def for_local_development(cls) -> "RayConfig":
+        """Single-node local Ray cluster."""
+        return cls(
+            ray_address=None,  # Local mode
+            max_actors=4,  # Limited for local machine
+            max_retries=1,  # Fail fast for debugging
+        )
+    
+    @classmethod
+    def for_production(cls, ray_address: str) -> "RayConfig":
+        """Production Ray cluster."""
+        return cls(
+            ray_address=ray_address,
+            max_actors=50,
+            max_retries=3,
+            task_timeout_seconds=7200,
+        )
+
+
+@dataclass
+class WTBConfig:
+    """Extended WTB configuration with Ray support."""
+    
+    # ... existing fields ...
+    
+    # Ray configuration
+    ray_enabled: bool = False
+    ray_config: Optional[RayConfig] = None
+    
+    # Environment provider
+    environment_provider: str = "ray"  # "ray", "grpc", "inprocess"
+    grpc_env_manager_url: Optional[str] = None
+    
+    @classmethod
+    def for_ray_production(
+        cls,
+        wtb_db_url: str,
+        ray_address: str,
+    ) -> "WTBConfig":
+        """Production config with Ray batch testing."""
+        return cls(
+            wtb_storage_mode="sqlalchemy",
+            wtb_db_url=wtb_db_url,
+            state_adapter_mode="agentgit",
+            ray_enabled=True,
+            ray_config=RayConfig.for_production(ray_address),
+            environment_provider="ray",
+        )
+```
+
+### 18.9 Component Summary
+
+| Component | Responsibility | Interface | Implementation |
+|-----------|----------------|-----------|----------------|
+| **RayBatchTestRunner** | Orchestrate parallel batch tests | `IBatchTestRunner` | Ray ActorPool |
+| **VariantExecutionActor** | Execute single variant | Ray Actor | PostgreSQL + AgentGit |
+| **IEnvironmentProvider** | Isolate execution environments | Abstract Interface | Ray runtime_env |
+| **RayConfig** | Ray cluster configuration | Dataclass | Config presets |
+| **BatchTestResult** | Store variant results | Domain Model | PostgreSQL |
+| **ComparisonMatrix** | Aggregate comparisons | Value Object | In-memory/ObjectRef |
+
+---
+
+## 19. Migration Path: ThreadPool → Ray
+
+### 19.1 Phase 1: Interface Abstraction (No Breaking Changes)
+
+```python
+# wtb/domain/interfaces/batch_runner.py
+
+from abc import ABC, abstractmethod
+
+class IBatchTestRunner(ABC):
+    """Interface for batch test execution."""
+    
+    @abstractmethod
+    def run_batch_test(self, batch_test: "BatchTest") -> "BatchTest":
+        """Execute batch test and return with results."""
+        pass
+    
+    @abstractmethod
+    def get_status(self, batch_test_id: str) -> "BatchTestStatus":
+        """Get current status of batch test."""
+        pass
+    
+    @abstractmethod
+    def cancel(self, batch_test_id: str) -> bool:
+        """Cancel running batch test."""
+        pass
+
+
+# Existing ThreadPoolBatchTestRunner implements this interface
+# New RayBatchTestRunner implements this interface
+# Factory selects based on config
+```
+
+### 19.2 Phase 2: Dual Mode Support with Dry-Run Parity Check
+
+```python
+# wtb/application/factories.py (additions)
+
+class BatchTestRunnerFactory:
+    """Factory for creating batch test runners."""
+    
+    @staticmethod
+    def create(config: WTBConfig) -> IBatchTestRunner:
+        """Create appropriate runner based on config."""
+        if config.ray_enabled and config.ray_config:
+            from wtb.application.services.ray_batch_runner import RayBatchTestRunner
+            return RayBatchTestRunner(
+                config=config.ray_config,
+                agentgit_db_url=config.agentgit_db_path,
+                wtb_db_url=config.wtb_db_url,
+            )
+        else:
+            from wtb.application.services.batch_test_runner import ThreadPoolBatchTestRunner
+            return ThreadPoolBatchTestRunner(
+                context_factory=ParallelContextFactory(config),
+                max_workers=config.max_batch_workers,
+            )
+    
+    @staticmethod
+    def create_parity_checker(config: WTBConfig) -> 'ParityChecker':
+        """
+        Create a parity checker for migration validation.
+        
+        Runs BOTH ThreadPool and Ray on a sample to verify result equivalence.
+        """
+        return ParityChecker(
+            threadpool_runner=ThreadPoolBatchTestRunner(
+                context_factory=ParallelContextFactory(config),
+                max_workers=2,
+            ),
+            ray_runner=RayBatchTestRunner(
+                config=config.ray_config,
+                agentgit_db_url=config.agentgit_db_path,
+                wtb_db_url=config.wtb_db_url,
+            ),
+        )
+
+
+class ParityChecker:
+    """
+    Validates that ThreadPool and Ray runners produce equivalent results.
+    
+    Use during migration to verify:
+    - Same variant combinations succeed/fail
+    - Comparable execution times (within tolerance)
+    - Identical final states
+    
+    Usage:
+        checker = BatchTestRunnerFactory.create_parity_checker(config)
+        report = checker.run_parity_check(batch_test, sample_size=5)
+        if report.is_equivalent:
+            print("Safe to migrate to Ray")
+        else:
+            print(f"Discrepancies: {report.discrepancies}")
+    """
+    
+    def __init__(
+        self,
+        threadpool_runner: 'ThreadPoolBatchTestRunner',
+        ray_runner: 'RayBatchTestRunner',
+    ):
+        self._threadpool = threadpool_runner
+        self._ray = ray_runner
+    
+    def run_parity_check(
+        self,
+        batch_test: 'BatchTest',
+        sample_size: int = 5,
+    ) -> 'ParityReport':
+        """
+        Run both runners on a sample and compare results.
+        
+        Args:
+            batch_test: Full batch test config
+            sample_size: Number of variants to sample for parity check
+        
+        Returns:
+            ParityReport with comparison results
+        """
+        # Sample variants
+        sampled = batch_test.sample_variants(sample_size)
+        
+        # Run ThreadPool
+        tp_result = self._threadpool.run_batch_test(sampled.copy())
+        
+        # Run Ray
+        ray_result = self._ray.run_batch_test(sampled.copy())
+        
+        # Compare
+        return self._compare_results(tp_result, ray_result)
+    
+    def _compare_results(
+        self,
+        tp_result: 'BatchTest',
+        ray_result: 'BatchTest',
+    ) -> 'ParityReport':
+        """Compare results from both runners."""
+        discrepancies = []
+        
+        for tp_r, ray_r in zip(tp_result.results, ray_result.results):
+            if tp_r.success != ray_r.success:
+                discrepancies.append({
+                    "combination": tp_r.combination_name,
+                    "type": "success_mismatch",
+                    "threadpool": tp_r.success,
+                    "ray": ray_r.success,
+                })
+            # Check timing is within 50% tolerance
+            if abs(tp_r.duration_ms - ray_r.duration_ms) / max(tp_r.duration_ms, 1) > 0.5:
+                discrepancies.append({
+                    "combination": tp_r.combination_name,
+                    "type": "timing_anomaly",
+                    "threadpool_ms": tp_r.duration_ms,
+                    "ray_ms": ray_r.duration_ms,
+                })
+        
+        return ParityReport(
+            is_equivalent=len(discrepancies) == 0,
+            discrepancies=discrepancies,
+            threadpool_total_ms=sum(r.duration_ms for r in tp_result.results),
+            ray_total_ms=sum(r.duration_ms for r in ray_result.results),
+        )
+
+
+@dataclass
+class ParityReport:
+    """Result of parity check between ThreadPool and Ray runners."""
+    is_equivalent: bool
+    discrepancies: List[Dict[str, Any]]
+    threadpool_total_ms: int
+    ray_total_ms: int
+```
+
+### 19.3 Phase 3: Full Ray Adoption
+
+| Milestone | Description | Risk Mitigation |
+|-----------|-------------|-----------------|
+| **M1** | IBatchTestRunner interface | Backward compatible |
+| **M2** | RayBatchTestRunner implementation | Feature flag (ray_enabled) |
+| **M2.5** | **ParityChecker dry-run** | **Run both runners on sample; verify equivalence** |
+| **M3** | Ray integration tests | CI with Ray local mode |
+| **M4** | Production rollout | Canary deployment with ParityChecker |
+| **M5** | Deprecate ThreadPool | 6-month notice |
+
+### 19.4 Deployment Checklist
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    RAY DEPLOYMENT CHECKLIST                                         │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  INFRASTRUCTURE:                                                                   │
+│  □ Ray cluster deployed (head + workers)                                          │
+│  □ PgBouncer configured for connection pooling                                    │
+│  □ Prometheus metrics endpoint exposed                                            │
+│  □ Grafana dashboards created for WTB metrics                                     │
+│                                                                                    │
+│  CONFIGURATION:                                                                    │
+│  □ WTBConfig.ray_enabled = true                                                   │
+│  □ WTBConfig.ray_config.ray_address = "ray://cluster:10001"                       │
+│  □ WTBConfig.wtb_db_url points to PgBouncer                                       │
+│  □ Environment provider configured (ray/grpc)                                      │
+│                                                                                    │
+│  VALIDATION:                                                                       │
+│  □ ParityChecker run on production-like data                                      │
+│  □ All discrepancies investigated and resolved                                    │
+│  □ Load test with target parallelism (100+ actors)                                │
+│  □ Connection pool limits verified                                                 │
+│                                                                                    │
+│  MONITORING:                                                                       │
+│  □ Alerts configured for batch test failures                                       │
+│  □ Alerts configured for connection pool exhaustion                               │
+│  □ Alerts configured for Ray actor crashes                                        │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
 ```

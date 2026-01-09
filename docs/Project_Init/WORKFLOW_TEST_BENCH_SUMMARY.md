@@ -988,10 +988,187 @@ ide_url: http://localhost:8000
 
 ---
 
+---
+
+## 7. Data Characteristics & Storage Strategy (2025-01)
+
+### 7.1 Data Lifecycle Classification
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    WTB DATA LIFECYCLE TAXONOMY                                       │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  EPHEMERAL DATA (Request-scoped)                                                   │
+│  ─────────────────────────────────                                                 │
+│  │ Data Type          │ Lifetime        │ Storage         │ Access Pattern      │ │
+│  ├────────────────────┼─────────────────┼─────────────────┼─────────────────────┤ │
+│  │ Workflow Config    │ Single request  │ Ray ObjectRef   │ Read-once           │ │
+│  │ Initial State      │ Single request  │ Ray ObjectRef   │ Read-once           │ │
+│  │ Comparison Matrix  │ Response only   │ Memory/ObjectRef│ Computed, read-once │ │
+│  │ Intermediate State │ Node execution  │ Stack/Heap      │ R/W within node     │ │
+│                                                                                    │
+│  SESSION DATA (Execution-scoped)                                                   │
+│  ──────────────────────────────────                                                │
+│  │ Data Type          │ Lifetime        │ Storage         │ Access Pattern      │ │
+│  ├────────────────────┼─────────────────┼─────────────────┼─────────────────────┤ │
+│  │ Execution State    │ Workflow run    │ Checkpoint JSON │ Snapshot/Restore    │ │
+│  │ Node Boundaries    │ Workflow run    │ WTB DB          │ Append-only         │ │
+│  │ Tool Invocations   │ Workflow run    │ AgentGit DB     │ Append-only         │ │
+│  │ Audit Events       │ Session         │ WTB DB          │ Append-only         │ │
+│                                                                                    │
+│  PERSISTENT DATA (System-scoped)                                                   │
+│  ────────────────────────────────                                                  │
+│  │ Data Type          │ Lifetime        │ Storage         │ Access Pattern      │ │
+│  ├────────────────────┼─────────────────┼─────────────────┼─────────────────────┤ │
+│  │ Workflow Defs      │ Indefinite      │ PostgreSQL      │ Read-heavy, CRUD    │ │
+│  │ Checkpoints        │ Configurable    │ AgentGit DB     │ Append, read for    │ │
+│  │                    │ retention       │                 │ rollback            │ │
+│  │ Batch Test Results │ Configurable    │ PostgreSQL      │ Append-only, query  │ │
+│  │ File Blobs         │ Indefinite      │ FileTracker     │ Write-once, read    │ │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Storage Technology Mapping
+
+| Data Category | Technology | Rationale |
+|---------------|------------|-----------|
+| **Ephemeral/Request** | Ray Object Store (Plasma) | Zero-copy sharing, automatic cleanup, distributed |
+| **Session State** | PostgreSQL + JSONB | ACID transactions, flexible schema for checkpoints |
+| **Persistent/Structured** | PostgreSQL (Row-based) | Strong consistency, relational queries |
+| **Time-Series/Audit** | PostgreSQL + BRIN or TimescaleDB | Efficient time-range queries, partitioning |
+| **File Content** | FileTracker (Content-addressed) | Deduplication, immutable blobs |
+
+### 7.3 Indexing Strategy Summary
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    INDEXING DECISION MATRIX                                         │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  INDEX TYPE │ USE WHEN                              │ EXAMPLE COLUMNS              │
+│  ───────────┼───────────────────────────────────────┼──────────────────────────────│
+│  B-Tree     │ Point lookups, range scans, ORDER BY  │ id, workflow_id, status      │
+│  GIN        │ JSONB contains/exists queries         │ metrics, config              │
+│  BRIN       │ Physically ordered data (time-series) │ created_at (append-only)     │
+│  Hash       │ Equality-only lookups (rarely used)   │ N/A (B-Tree preferred)       │
+│                                                                                    │
+│  KEY INDEXES:                                                                      │
+│  • wtb_executions(workflow_id, status) - Common filter pattern                    │
+│  • checkpoints(internal_session_id, id) - Rollback chain traversal                │
+│  • wtb_batch_test_results(batch_test_id) - Aggregate results                      │
+│  • audit_events(created_at) BRIN - Time-range queries                             │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.4 Transaction Boundaries
+
+| Operation | Boundary | Consistency |
+|-----------|----------|-------------|
+| Create Execution | Single DB transaction | Strong |
+| Node Checkpoint | Outbox pattern (WTB → AgentGit) | Eventual |
+| Batch Test Aggregate | Collect from ObjectRefs | Eventual |
+| Rollback | Single session transaction | Strong |
+| File Commit | FileTracker transaction | Strong |
+
+---
+
+## 8. Ray-Based Batch Test Execution (2025-01)
+
+### 8.1 Architecture Overview
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    RAY BATCH TEST EXECUTION FLOW                                     │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  User Request                                                                      │
+│      │                                                                             │
+│      ▼                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐ │
+│  │  RayBatchTestRunner (Orchestrator)                                            │ │
+│  │                                                                               │ │
+│  │  1. Put workflow + initial_state → Ray Object Store                          │ │
+│  │  2. Create Actor Pool (database connection reuse)                            │ │
+│  │  3. Submit variants with backpressure control                                │ │
+│  │  4. Collect results via ray.wait()                                           │ │
+│  │  5. Build comparison matrix                                                   │ │
+│  └───────────────────────────────────┬──────────────────────────────────────────┘ │
+│                                      │                                             │
+│          ┌───────────────────────────┼───────────────────────────┐                │
+│          ▼                           ▼                           ▼                │
+│  ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────┐     │
+│  │  Worker Node 1    │      │  Worker Node 2    │      │  Worker Node N    │     │
+│  │                   │      │                   │      │                   │     │
+│  │  @ray.remote(     │      │  @ray.remote(     │      │  @ray.remote(     │     │
+│  │    num_cpus=1,    │      │    num_cpus=1,    │      │    num_cpus=1,    │     │
+│  │    memory=2GB)    │      │    memory=2GB)    │      │    memory=2GB)    │     │
+│  │                   │      │                   │      │                   │     │
+│  │  • Apply variant  │      │  • Apply variant  │      │  • Apply variant  │     │
+│  │  • Run workflow   │      │  • Run workflow   │      │  • Run workflow   │     │
+│  │  • Save results   │      │  • Save results   │      │  • Save results   │     │
+│  └───────────────────┘      └───────────────────┘      └───────────────────┘     │
+│          │                           │                           │                │
+│          └───────────────────────────┼───────────────────────────┘                │
+│                                      ▼                                             │
+│                          ┌───────────────────────┐                                │
+│                          │  PostgreSQL (WTB DB)  │                                │
+│                          │  • batch_tests        │                                │
+│                          │  • batch_test_results │                                │
+│                          │  • executions         │                                │
+│                          └───────────────────────┘                                │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Execution Framework** | Ray | Distributed parallelism, resource management, fault tolerance |
+| **Parallelism Unit** | Ray Actor | Database connection reuse, better than Tasks for stateful ops |
+| **State Sharing** | ObjectRef (immutable) | Zero-copy, no race conditions |
+| **Backpressure** | ray.wait() with limit | Prevents memory exhaustion |
+| **Failure Handling** | max_retries + dead-letter | Automatic retry, explicit failure tracking |
+
+### 8.3 Environment Management Integration
+
+**Decision**: Adapt existing environment service via interface abstraction.
+
+```
+IEnvironmentProvider
+├── InProcessProvider     (testing - no isolation)
+├── RayEnvironmentProvider (production - Ray runtime_env)
+└── GrpcEnvironmentProvider (optional - wraps existing service)
+```
+
+**Recommendation**: Use `RayEnvironmentProvider` by default. The existing gRPC environment manager can be integrated via `GrpcEnvironmentProvider` if container-level isolation is required.
+
+### 8.4 Configuration Modes
+
+```yaml
+# Development (local Ray)
+ray_enabled: true
+ray_address: null  # Local mode
+max_actors: 4
+
+# Production (Ray cluster)
+ray_enabled: true
+ray_address: "ray://cluster-head:10001"
+max_actors: 50
+task_timeout: 7200
+```
+
+---
+
 ## 相关文档
 
 | 文档                                        | 内容                             |
 | ------------------------------------------- | -------------------------------- |
-| `WORKFLOW_TEST_BENCH_DESIGN.md`           | 完整架构设计、领域模型、API 设计 |
-| `WORKFLOW_TEST_BENCH_EVALUATION_SPEC.md`  | 评估框架详细规范、内置评估器     |
-| `WORKFLOW_TEST_BENCH_INTEGRATION_SPEC.md` | 集成规范、文件追踪、配置详情     |
+| `WORKFLOW_TEST_BENCH_ARCHITECTURE.md`     | 完整架构设计、Ray BatchTestRunner、领域模型、API 设计 |
+| `DATABASE_DESIGN.md`                       | 三库架构、索引策略、存储决策 |
+| `PROGRESS_TRACKER.md`                      | 实现状态跟踪 |
+| [EventBus_and_Audit_Session/](../EventBus_and_Audit_Session/) | Event Bus 与审计设计 |
+| [Adapter_and_WTB-Storage/](../Adapter_and_WTB-Storage/) | 状态适配器与存储设计 |

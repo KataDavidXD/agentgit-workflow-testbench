@@ -1,0 +1,15 @@
+text_001	character	ROMEO	{"role": "protagonist"}
+text_001	emotion	But soft!	{"type": "wonder"}
+text_001	relationship	Juliet is the sun	{"type": "metaphor"}
+text_001	emotion	envious	{"type": "jealousy"}
+text_001	character	moon	{"role": "symbol"}
+text_002	character	JULIET	{"role": "protagonist"}
+text_002	emotion	O Romeo, Romeo!	{"type": "longing"}
+text_002	relationship	Deny thy father	{"type": "familial conflict"}
+text_002	relationship	refuse thy name	{"type": "identity"}
+text_002	relationship	That which we call a rose By any other name would smell as sweet	{"type": "metaphor"}
+text_003	character	ROMEO	{"role": "protagonist"}
+text_003	emotion	Shall I hear more, or shall I speak at this?	{"type": "hesitation"}
+text_003	character	JULIET	{"role": "protagonist"}
+text_003	emotion	'Tis but thy name that is my enemy.	{"type": "conflict"}
+text_003	relationship	Thou art thyself, though not a Montague.	{"type": "identity"}

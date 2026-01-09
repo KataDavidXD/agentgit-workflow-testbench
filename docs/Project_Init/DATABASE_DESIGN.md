@@ -1528,6 +1528,197 @@ class AgentGitStateAdapter(IStateAdapter):
 
 ---
 
+---
+
+## Batch Test Storage Schema (2025-01 Addition)
+
+### New Tables for Ray-Based Batch Testing
+
+```sql
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- BATCH TEST SCHEMA (Ray Integration)
+-- Stores batch test configurations and aggregated results
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- -----------------------------------------------------------------------------
+-- BATCH TESTS: Top-level batch test configuration
+-- -----------------------------------------------------------------------------
+CREATE TABLE wtb_batch_tests (
+    id TEXT PRIMARY KEY,                 -- UUID
+    name TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    
+    -- Configuration
+    variant_combinations TEXT NOT NULL,   -- JSON array of {node_id: variant_id} maps
+    parallel_count INTEGER DEFAULT 4,
+    initial_state TEXT,                   -- JSON: Initial state for all executions
+    
+    -- Status tracking
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
+    total_variants INTEGER NOT NULL,
+    completed_variants INTEGER DEFAULT 0,
+    failed_variants INTEGER DEFAULT 0,
+    
+    -- Timestamps
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    
+    -- Results
+    comparison_matrix TEXT,               -- JSON: Aggregated comparison results
+    
+    -- Error tracking
+    error_message TEXT,
+    
+    -- Metadata
+    metadata TEXT,                        -- JSON
+    
+    FOREIGN KEY (workflow_id) REFERENCES wtb_workflows(id)
+);
+
+CREATE INDEX idx_wtb_batch_tests_workflow ON wtb_batch_tests(workflow_id);
+CREATE INDEX idx_wtb_batch_tests_status ON wtb_batch_tests(status);
+CREATE INDEX idx_wtb_batch_tests_created ON wtb_batch_tests(created_at);
+CREATE INDEX idx_wtb_batch_tests_workflow_status ON wtb_batch_tests(workflow_id, status);
+
+-- -----------------------------------------------------------------------------
+-- BATCH TEST RESULTS: Individual variant execution results
+-- -----------------------------------------------------------------------------
+CREATE TABLE wtb_batch_test_results (
+    id TEXT PRIMARY KEY,                 -- UUID
+    batch_test_id TEXT NOT NULL,
+    execution_id TEXT,                   -- FK to wtb_executions (nullable if failed early)
+    
+    -- Variant identification
+    combination_name TEXT NOT NULL,      -- Display name
+    combination_config TEXT NOT NULL,    -- JSON: {node_id: variant_id}
+    
+    -- Result status
+    success BOOLEAN NOT NULL,
+    duration_ms INTEGER,
+    error_message TEXT,
+    error_details TEXT,                  -- JSON: Stack trace, context
+    
+    -- Metrics (JSONB for flexible schema)
+    metrics TEXT,                        -- JSON: {accuracy: 0.95, latency_ms: 120, cost: 0.05}
+    
+    -- Timestamps
+    started_at TEXT,
+    completed_at TEXT NOT NULL,
+    
+    -- Ray metadata
+    ray_task_id TEXT,
+    ray_actor_id TEXT,
+    retry_count INTEGER DEFAULT 0,
+    
+    FOREIGN KEY (batch_test_id) REFERENCES wtb_batch_tests(id) ON DELETE CASCADE,
+    FOREIGN KEY (execution_id) REFERENCES wtb_executions(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_wtb_batch_results_batch ON wtb_batch_test_results(batch_test_id);
+CREATE INDEX idx_wtb_batch_results_batch_success ON wtb_batch_test_results(batch_test_id, success);
+CREATE INDEX idx_wtb_batch_results_execution ON wtb_batch_test_results(execution_id);
+-- For PostgreSQL with JSONB:
+-- CREATE INDEX idx_wtb_batch_results_metrics ON wtb_batch_test_results USING GIN (metrics jsonb_path_ops);
+```
+
+---
+
+## Indexing Strategy (2025-01 Addition)
+
+### Index Type Selection Criteria
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                    INDEXING STRATEGY DECISION FRAMEWORK                             │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  QUESTION 1: What is the primary access pattern?                                  │
+│  ─────────────────────────────────────────────────                                │
+│                                                                                    │
+│  Point Lookup (WHERE id = ?)           → B-Tree                                   │
+│  Range Scan (WHERE created_at > ?)     → B-Tree or BRIN (if ordered inserts)     │
+│  Pattern Match (WHERE name LIKE ?)     → B-Tree (prefix) or GIN (trigram)        │
+│  JSON Contains (WHERE metrics @> ?)    → GIN                                      │
+│  Full Text Search                      → GIN (tsvector)                           │
+│                                                                                    │
+│  QUESTION 2: Is data physically ordered by insert time?                          │
+│  ────────────────────────────────────────────────────────                         │
+│                                                                                    │
+│  YES (append-only logs, audit events)  → BRIN (90% smaller than B-Tree)          │
+│  NO (random inserts/updates)           → B-Tree                                   │
+│                                                                                    │
+│  QUESTION 3: What is the column cardinality?                                     │
+│  ─────────────────────────────────────────────                                    │
+│                                                                                    │
+│  High (unique or near-unique)          → B-Tree                                   │
+│  Low (status enum, boolean)            → Partial index or skip                   │
+│  JSONB with nested keys                → GIN                                      │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### WTB Index Inventory
+
+| Table | Column(s) | Index Type | Rationale |
+|-------|-----------|------------|-----------|
+| `wtb_workflows` | `id` | B-Tree (PK) | Point lookups |
+| `wtb_executions` | `workflow_id` | B-Tree | Filter by workflow |
+| `wtb_executions` | `status` | B-Tree | Filter active executions |
+| `wtb_executions` | `(workflow_id, status)` | B-Tree Composite | Common query pattern |
+| `wtb_node_boundaries` | `internal_session_id` | B-Tree | Join/filter by session |
+| `wtb_node_boundaries` | `execution_id` | B-Tree | Filter by execution |
+| `wtb_batch_tests` | `(workflow_id, status)` | B-Tree Composite | Dashboard queries |
+| `wtb_batch_test_results` | `batch_test_id` | B-Tree | Aggregate results |
+| `wtb_batch_test_results` | `metrics` | GIN (PostgreSQL) | Metric-based queries |
+| `checkpoints` | `(internal_session_id, id)` | B-Tree Composite | Rollback chain |
+
+### BRIN vs B-Tree for Time-Series Data
+
+```
+For audit_events or large append-only tables:
+
+B-Tree Index:
+• Index size: ~30% of table size
+• Any query pattern supported
+• Good for random access
+
+BRIN Index:
+• Index size: ~1-3% of table size  (10-30x smaller!)
+• Only efficient if data is physically ordered
+• Best for timestamp columns with append-only inserts
+
+RECOMMENDATION:
+• Use BRIN for created_at on audit tables
+• Use B-Tree for status, execution_id (random access needed)
+• Partition large tables by time (monthly/weekly)
+```
+
+---
+
+## Storage Capacity Planning
+
+### Estimated Data Volumes
+
+| Scenario | Batch Tests/Day | Variants/Test | Executions/Day | 30-Day Storage |
+|----------|-----------------|---------------|----------------|----------------|
+| **Development** | 10 | 5 | 50 | ~100 MB |
+| **Production (Small)** | 50 | 10 | 500 | ~1 GB |
+| **Production (Large)** | 200 | 20 | 4,000 | ~10 GB |
+| **Enterprise** | 1,000 | 50 | 50,000 | ~100 GB |
+
+### Per-Record Size Estimates
+
+| Table | Avg Row Size | Notes |
+|-------|--------------|-------|
+| `wtb_batch_tests` | 2 KB | Includes comparison_matrix JSON |
+| `wtb_batch_test_results` | 1 KB | Metrics JSON varies |
+| `wtb_executions` | 0.5 KB | Config and metadata |
+| `checkpoints` | 5-10 KB | Full state snapshot |
+| `file_blobs` | Variable | Content-addressed; deduplicated |
+
+---
+
 ## Summary
 
 ### Data Storage Distribution
@@ -1538,6 +1729,7 @@ class AgentGitStateAdapter(IStateAdapter):
 | wtb_node_boundaries | wtb.db | WTB | Node completion markers (pointers to checkpoints) |
 | wtb_checkpoint_files | wtb.db | WTB | FileTracker links |
 | wtb_workflows, wtb_executions | wtb.db | WTB | Workflow management |
+| **wtb_batch_tests, wtb_batch_test_results** | **wtb.db** | **WTB** | **Batch test orchestration** |
 | commits, file_blobs, file_mementos | filetracker.db | FileTracker | File versioning |
 
 ### WTB Storage Implementations
@@ -1546,7 +1738,8 @@ class AgentGitStateAdapter(IStateAdapter):
 |----------------|----------|-------------|-------------|
 | `InMemoryUnitOfWork` | Unit tests, fast iteration | No (RAM only) | Fastest |
 | `SQLAlchemyUnitOfWork` (SQLite) | Development, single-user production | Yes (file) | Fast |
-| `SQLAlchemyUnitOfWork` (PostgreSQL) | Scaled production | Yes (server) | Scalable |
+| `SQLAlchemyUnitOfWork` (PostgreSQL) | Scaled production, Ray batch testing | Yes (server) | Scalable |
+| **Ray Object Store** | Ephemeral batch test data | No (session-scoped) | Zero-copy |
 
 ### Key Benefits of Option B
 
@@ -1557,6 +1750,7 @@ class AgentGitStateAdapter(IStateAdapter):
 5. **Dual implementation** - InMemory for tests, SQLAlchemy for production
 6. **SQLAlchemy for WTB** - Modern ORM for new tables
 7. **Cross-database references** - Logical FKs via stored IDs
+8. **Ray-ready** - Ephemeral data in Object Store; persistent in PostgreSQL
 
 ### Design Principles
 
@@ -1566,3 +1760,5 @@ class AgentGitStateAdapter(IStateAdapter):
 | **Single Checkpoint Type** | All checkpoints atomic at tool/message level; node boundaries are pointers |
 | **Interface Abstraction** | IUnitOfWork, IRepository enable swappable implementations |
 | **Dependency Injection** | UnitOfWorkFactory enables test/production switching |
+| **Data Lifecycle Aware** | Ephemeral → Ray ObjectRef; Persistent → PostgreSQL |
+| **Index Strategy** | B-Tree for random access; BRIN for time-series; GIN for JSONB |

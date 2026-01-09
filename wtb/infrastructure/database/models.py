@@ -353,3 +353,38 @@ class OutboxEventORM(Base):
             name='ck_outbox_status'
         ),
     )
+
+
+class AuditLogORM(Base):
+    """
+    ORM model for wtb_audit_logs table.
+    
+    Persists WTB audit trail entries.
+    """
+    
+    __tablename__ = 'wtb_audit_logs'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    
+    # Context
+    execution_id = Column(String(64), nullable=True)
+    node_id = Column(String(255), nullable=True)
+    
+    # Event details
+    timestamp = Column(DateTime, nullable=False)
+    event_type = Column(String(50), nullable=False)
+    severity = Column(String(20), nullable=False)
+    message = Column(Text, nullable=False)
+    
+    # Extended data (JSON)
+    details = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    duration_ms = Column(Float, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_wtb_audit_logs_execution', 'execution_id'),
+        Index('idx_wtb_audit_logs_timestamp', 'timestamp'),
+        Index('idx_wtb_audit_logs_type', 'event_type'),
+    )

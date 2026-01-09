@@ -1,0 +1,15 @@
+{"document_id": "text_001", "extraction_index": 1, "class": "character", "text": "ROMEO", "position": {"start": 1, "end": 6}, "alignment": "match_exact", "attributes": {"role": "protagonist"}}
+{"document_id": "text_001", "extraction_index": 2, "class": "emotion", "text": "But soft!", "position": {"start": 8, "end": 17}, "alignment": "match_exact", "attributes": {"type": "wonder"}}
+{"document_id": "text_001", "extraction_index": 3, "class": "relationship", "text": "Juliet is the sun", "position": {"start": 79, "end": 96}, "alignment": "match_exact", "attributes": {"type": "metaphor"}}
+{"document_id": "text_001", "extraction_index": 4, "class": "emotion", "text": "envious", "position": {"start": 128, "end": 135}, "alignment": "match_exact", "attributes": {"type": "jealousy"}}
+{"document_id": "text_001", "extraction_index": 5, "class": "character", "text": "moon", "position": {"start": 136, "end": 140}, "alignment": "match_exact", "attributes": {"role": "symbol"}}
+{"document_id": "text_002", "extraction_index": 1, "class": "character", "text": "JULIET", "position": {"start": 1, "end": 7}, "alignment": "match_exact", "attributes": {"role": "protagonist"}}
+{"document_id": "text_002", "extraction_index": 2, "class": "emotion", "text": "O Romeo, Romeo!", "position": {"start": 9, "end": 24}, "alignment": "match_exact", "attributes": {"type": "longing"}}
+{"document_id": "text_002", "extraction_index": 3, "class": "relationship", "text": "Deny thy father", "position": {"start": 51, "end": 66}, "alignment": "match_exact", "attributes": {"type": "familial conflict"}}
+{"document_id": "text_002", "extraction_index": 4, "class": "relationship", "text": "refuse thy name", "position": {"start": 71, "end": 86}, "alignment": "match_exact", "attributes": {"type": "identity"}}
+{"document_id": "text_002", "extraction_index": 5, "class": "relationship", "text": "That which we call a rose By any other name would smell as sweet", "position": {"start": 106, "end": 170}, "alignment": "match_exact", "attributes": {"type": "metaphor"}}
+{"document_id": "text_003", "extraction_index": 1, "class": "character", "text": "ROMEO", "position": {"start": 1, "end": 6}, "alignment": "match_exact", "attributes": {"role": "protagonist"}}
+{"document_id": "text_003", "extraction_index": 2, "class": "emotion", "text": "Shall I hear more, or shall I speak at this?", "position": {"start": 8, "end": 52}, "alignment": "match_exact", "attributes": {"type": "hesitation"}}
+{"document_id": "text_003", "extraction_index": 3, "class": "character", "text": "JULIET", "position": {"start": 53, "end": 59}, "alignment": "match_exact", "attributes": {"role": "protagonist"}}
+{"document_id": "text_003", "extraction_index": 4, "class": "emotion", "text": "'Tis but thy name that is my enemy.", "position": {"start": 61, "end": 96}, "alignment": "match_exact", "attributes": {"type": "conflict"}}
+{"document_id": "text_003", "extraction_index": 5, "class": "relationship", "text": "Thou art thyself, though not a Montague.", "position": {"start": 97, "end": 137}, "alignment": "match_exact", "attributes": {"type": "identity"}}

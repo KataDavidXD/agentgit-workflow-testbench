@@ -1,0 +1,14 @@
+chunk_id	class	text	attributes
+1	character	ROMEO	{"role": "protagonist"}
+1	character	JULIET	{"role": "protagonist"}
+1	relationship	THE TRAGEDY OF ROMEO AND JULIET	{"type": "central relationship"}
+2	character	William Shakespeare	{"role": "author"}
+3	character	THE PROLOGUE	{"role": "narrator"}
+3	character	CHORUS	{"role": "narrator"}
+4	character	Friar Lawrence	{"role": "Friar"}
+4	character	Juliet	{"role": "Capulet"}
+4	character	Capulet	{"role": "head of Capulet family"}
+5	character	ESCALUS, Prince of Verona	{"role": "Prince of Verona"}
+5	character	MERCUTIO, kinsman to the Prince, and friend to Romeo	{"role": "kinsman to the Prince", "relationship_to_Romeo": "friend to Romeo"}
+5	character	PARIS, a young Nobleman, kinsman to the Prince	{"role": "a young Nobleman", "relationship_to_Prince": "kinsman to the Prince"}
+5	character	Page to Paris	{"role": "Page", "relationship_to_Paris": "to Paris"}

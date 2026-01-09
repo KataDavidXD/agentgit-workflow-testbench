@@ -1,6 +1,6 @@
 # WTB Project Progress Tracker
 
-**Last Updated:** 2024-12-23 22:00 UTC+8
+**Last Updated:** 2025-01-09 (Night) UTC+8
 
 ## Project Structure
 
@@ -8,29 +8,35 @@
 wtb/
 ├── domain/
 │   ├── models/          [DONE] workflow, execution, node_boundary, checkpoint_file, batch_test, evaluation
-│   │                    [NEW]  outbox (OutboxEvent), integrity (IntegrityIssue, IntegrityReport)
-│   │                    [NEW]  Rich Domain Model for Execution entity
+│   │                    [DONE] outbox (OutboxEvent), integrity (IntegrityIssue, IntegrityReport)
+│   │                    [DONE] Rich Domain Model for Execution entity
 │   ├── interfaces/      [DONE] repositories, unit_of_work, state_adapter, execution_controller, node_replacer
-│   │                    [NEW]  IOutboxRepository
+│   │                    [DONE] IOutboxRepository, IAuditLogRepository
+│   │                    [DONE] IEnvironmentProvider, IBatchTestRunner ← NEW (2025-01-09)
 │   ├── events/          [DONE] execution_events, node_events, checkpoint_events
-│   └── audit/           [DESIGN] WTBAuditTrail, WTBAuditEntry
+│   └── audit/           [DONE] WTBAuditTrail, WTBAuditEntry (moved to infrastructure/events)
 ├── application/
 │   ├── services/        [DONE] execution_controller, node_replacer
-│   │                    [DESIGN] batch_test_runner (parallel), parallel_context
-│   └── factories.py     [NEW] ExecutionControllerFactory, NodeReplacerFactory
+│   │                    [DONE] ThreadPoolBatchTestRunner, RayBatchTestRunner (stub) ← NEW (2025-01-09)
+│   │                    [DESIGN] ParallelContextFactory
+│   └── factories.py     [DONE] ExecutionControllerFactory, NodeReplacerFactory, BatchTestRunnerFactory ← NEW
 ├── infrastructure/
 │   ├── database/        [DONE] config, setup, models (ORM), repositories, unit_of_work, inmemory_unit_of_work, factory
-│   │                    [NEW]  OutboxORM model, SQLAlchemyOutboxRepository, InMemoryOutboxRepository
-│   │                    [TODO] WAL mode configuration for SQLite
+│   │                    [DONE] OutboxORM model, SQLAlchemyOutboxRepository, InMemoryOutboxRepository
+│   │                    [DONE] AuditLogORM, SQLAlchemyAuditLogRepository, InMemoryAuditLogRepository
+│   │                    [DONE] migrations/ with 002_batch_tests.sql, 003_postgresql_production.sql ← NEW
 │   ├── adapters/        [DONE] InMemoryStateAdapter, AgentGitStateAdapter
 │   │                    [TODO] session_manager (lifecycle cleanup)
-│   ├── outbox/          [NEW]  OutboxProcessor (background worker)
-│   ├── integrity/       [NEW]  IntegrityChecker (cross-DB consistency)
-│   └── events/          [DESIGN] WTBEventBus, AuditEventListener
-├── config.py            [NEW] WTBConfig with storage modes
+│   ├── environment/     [DONE] InProcessEnvironmentProvider, RayEnvironmentProvider ← NEW (2025-01-09)
+│   ├── outbox/          [DONE] OutboxProcessor (background worker)
+│   ├── integrity/       [DONE] IntegrityChecker (cross-DB consistency)
+│   └── events/          [DONE] WTBEventBus, WTBAuditTrail, AuditEventListener ← NEW (2025-01-09)
+├── config.py            [DONE] WTBConfig with storage modes
+│                        [DONE] RayConfig for batch testing ← NEW (2025-01-09)
 ├── tests/
-│   └── test_wtb/        [DONE] 208 tests passing (+62 new tests)
-│                        [NEW]  test_outbox.py, test_integrity.py, test_cross_db_consistency.py
+│   └── test_wtb/        [DONE] 275 tests passing (+67 new tests)
+│                        [DONE] test_outbox.py, test_integrity.py, test_cross_db_consistency.py
+│                        [DONE] test_event_bus.py, test_audit_trail.py, test_batch_runner.py, test_audit_repository.py ← NEW
 │                        [TODO] test_parallel_sessions.py
 └── examples/
     └── ml_pipeline_workflow.py  [DONE] 10-step ML pipeline with LangChain LLM + rollback
@@ -43,7 +49,7 @@ wtb/
 | Domain Models                        | ✓              | Workflow, Execution, NodeBoundary, CheckpointFile, BatchTest, Evaluation |
 | Domain Interfaces                    | ✓              | IRepository, IStateAdapter, IExecutionController, INodeReplacer          |
 | Domain Events                        | ✓              | Execution, Node, Checkpoint events                                       |
-| SQLAlchemy ORM                       | ✓              | All 7 WTB tables defined + OutboxORM                                     |
+| SQLAlchemy ORM                       | ✓              | All 7 WTB tables defined + OutboxORM + AuditLogORM                       |
 | Repositories                         | ✓              | All repository implementations                                           |
 | SQLAlchemyUnitOfWork                 | ✓              | Production UoW with SQLAlchemy                                           |
 | **InMemoryUnitOfWork**         | ✓**NEW** | For testing - no I/O, fast, isolated                                     |
@@ -59,10 +65,72 @@ wtb/
 | **Outbox Pattern**             | ✓**NEW** | Cross-DB consistency (P0 fix)                                            |
 | **IntegrityChecker**           | ✓**NEW** | Data integrity validation (P0 fix)                                       |
 | **Rich Domain Model**          | ✓**NEW** | Enhanced Execution entity (P1 fix)                                       |
-| Unit Tests                           | ✓              | 208 tests passing (+62 new tests)                                        |
+| **WTBEventBus**                | ✓**NEW** | Thread-safe event bus with bounded history (2025-01-09)                 |
+| **WTBAuditTrail**              | ✓**NEW** | Execution/Node-level audit tracking (2025-01-09)                        |
+| **IAuditLogRepository**        | ✓**NEW** | Persistence for audit logs (2025-01-09)                                 |
+| **IBatchTestRunner**           | ✓**NEW** | Interface for batch test execution (2025-01-09)                         |
+| **ThreadPoolBatchTestRunner**  | ✓**NEW** | Local multithreaded batch runner (2025-01-09)                           |
+| **RayBatchTestRunner**         | ✓**STUB** | Ray-based distributed batch runner (2025-01-09)                         |
+| **VariantExecutionActor**      | ✓**STUB** | Ray Actor for variant execution (2025-01-09)                            |
+| **BatchTestRunnerFactory**     | ✓**NEW** | Factory for ThreadPool/Ray selection (2025-01-09)                       |
+| **RayConfig**                  | ✓**NEW** | Ray cluster configuration (2025-01-09)                                  |
+| **IEnvironmentProvider**       | ✓**NEW** | Environment isolation interface (2025-01-09)                            |
+| **RayEnvironmentProvider**     | ✓**NEW** | Ray runtime_env provider (2025-01-09)                                   |
+| **Database Migrations**        | ✓**NEW** | Batch test tables + PostgreSQL indexes (2025-01-09)                     |
+| Unit Tests                           | ✓              | 275 tests passing (+67 new tests on 2025-01-09)                         |
 | ML Pipeline Example                  | ✓              | LangChain + real rollback demo                                           |
 
-## New Implementation (2024-12-23)
+## New Implementation (2025-01-09)
+
+### Files Created (TODAY):
+
+**Event Bus & Audit:**
+- `wtb/infrastructure/events/__init__.py` - Event module exports
+- `wtb/infrastructure/events/wtb_event_bus.py` - Thread-safe WTBEventBus with bounded history
+- `wtb/infrastructure/events/wtb_audit_trail.py` - WTBAuditTrail, WTBAuditEntry, AuditEventListener
+- `wtb/infrastructure/database/repositories/audit_repository.py` - AuditLogRepository
+
+**Batch Test Infrastructure:**
+- `wtb/domain/interfaces/batch_runner.py` - IBatchTestRunner, IEnvironmentProvider interfaces
+- `wtb/application/services/batch_test_runner.py` - ThreadPoolBatchTestRunner implementation
+- `wtb/application/services/ray_batch_runner.py` - RayBatchTestRunner (stub), VariantExecutionActor
+
+**Environment Providers:**
+- `wtb/infrastructure/environment/__init__.py` - Environment module exports
+- `wtb/infrastructure/environment/providers.py` - InProcess/Ray/Grpc environment providers
+
+**Database Migrations:**
+- `wtb/infrastructure/database/migrations/002_batch_tests.sql` - SQLite batch test tables
+- `wtb/infrastructure/database/migrations/003_postgresql_production.sql` - PostgreSQL indexes + JSONB
+
+**Tests:**
+- `tests/test_wtb/test_event_bus.py` - 20 tests for WTBEventBus
+- `tests/test_wtb/test_audit_trail.py` - 24 tests for WTBAuditTrail
+- `tests/test_wtb/test_audit_repository.py` - 3 tests for AuditRepository
+- `tests/test_wtb/test_batch_runner.py` - 20 tests for batch runners
+
+**Modified:**
+- `wtb/config.py` - Added RayConfig dataclass and ray_enabled/ray_config fields
+- `wtb/application/factories.py` - Added BatchTestRunnerFactory
+- `wtb/domain/interfaces/__init__.py` - Export batch runner interfaces
+- `wtb/infrastructure/__init__.py` - Export event bus and environment providers
+- `wtb/domain/interfaces/repositories.py` - Added IAuditLogRepository
+- `wtb/domain/interfaces/unit_of_work.py` - Added audit_logs
+- `wtb/infrastructure/database/models.py` - Added AuditLogORM
+- `wtb/infrastructure/database/unit_of_work.py` - Added audit_logs initialization
+- `wtb/infrastructure/database/inmemory_unit_of_work.py` - Added InMemoryAuditLogRepository
+
+### Design Patterns Implemented (2025-01-09):
+
+- **Thread-Safe Event Bus**: RLock + bounded deque for concurrent access
+- **Publish-Subscribe**: Event-driven audit tracking via AuditEventListener
+- **Factory Pattern**: BatchTestRunnerFactory for ThreadPool/Ray selection
+- **Interface Abstraction**: IBatchTestRunner, IEnvironmentProvider for swappable implementations
+- **Actor Pattern (Ray)**: VariantExecutionActor for connection reuse
+
+---
+
+## Previous Implementation (2024-12-23)
 
 ### Files Created:
 
@@ -176,9 +244,51 @@ wtb/
 - `docs/EventBus_and_Audit_Session/WTB_EVENTBUS_AUDIT_DESIGN.md` - Full design document
 - `docs/EventBus_and_Audit_Session/INDEX.md` - Navigation index
 
-## Parallel Session Design (2024-12-23) - DESIGN COMPLETE
+## Ray Batch Test Runner Design (2025-01) - DESIGN COMPLETE ✓
 
-### Design Decision: Multithreading + Application-Level Isolation
+### Design Decision: Ray over ThreadPoolExecutor
+
+| Criteria | ThreadPoolExecutor | Ray | Decision |
+|----------|-------------------|-----|----------|
+| **Parallelism** | GIL-bound | True distributed | Ray ✓ |
+| **Resource Mgmt** | Manual | Declarative (`num_cpus`, `memory`) | Ray ✓ |
+| **Failure Handling** | Basic exceptions | Built-in retry, fault tolerance | Ray ✓ |
+| **Scaling** | Single-node | Multi-node cluster | Ray ✓ |
+| **Development** | Simple | Local mode available | Tie |
+
+### Key Components Designed
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| `RayBatchTestRunner` | ✅ DESIGNED | Orchestrates parallel batch tests with ActorPool |
+| `VariantExecutionActor` | ✅ DESIGNED | Ray Actor for executing single variant |
+| `IBatchTestRunner` | ✅ DESIGNED | Interface for ThreadPool/Ray abstraction |
+| `BatchTestRunnerFactory` | ✅ DESIGNED | Factory for runner selection |
+| `RayConfig` | ✅ DESIGNED | Cluster configuration dataclass |
+| `IEnvironmentProvider` | ✅ DESIGNED | Environment isolation interface |
+| `RayEnvironmentProvider` | ✅ DESIGNED | Ray runtime_env implementation |
+
+### Environment Management Decision
+
+**Decision**: Adapt existing environment service via interface abstraction.
+- Default: `RayEnvironmentProvider` (Ray runtime_env)
+- Optional: `GrpcEnvironmentProvider` (wraps existing service)
+- Rationale: Ray runtime_env is sufficient for most cases; interface allows future integration
+
+### Documentation References
+
+- Architecture: `WORKFLOW_TEST_BENCH_ARCHITECTURE.md` §17-19
+- Data Storage: `DATABASE_DESIGN.md` (Batch Test Schema)
+- Summary: `WORKFLOW_TEST_BENCH_SUMMARY.md` §7-8
+
+---
+
+## Parallel Session Design (2024-12-23) - SUPERSEDED BY RAY DESIGN
+
+> **Note**: The ThreadPoolExecutor design below is superseded by Ray for production.
+> ThreadPoolExecutor remains available for development/testing via `BatchTestRunnerFactory`.
+
+### Original Design Decision: Multithreading + Application-Level Isolation
 
 | Approach                     | Decision                | Rationale                                                     |
 | ---------------------------- | ----------------------- | ------------------------------------------------------------- |
@@ -216,22 +326,150 @@ wtb/
 
 ---
 
-## TODO
+---
+
+## ✅ COMPLETED TODAY (2025-01-09)
+
+### Morning: Event Bus & Audit Trail - ✓ DONE
+
+| # | Task | Status | Files Created |
+|---|------|--------|---------------|
+| 1 | **Implement `WTBEventBus`** | ✅ DONE | `wtb/infrastructure/events/wtb_event_bus.py` |
+| | - Standalone thread-safe implementation (RLock) | | |
+| | - Bounded history (deque with maxlen) | | |
+| | - Optional AgentGit bridge | | |
+| | - 20 unit tests passing | | |
+| 2 | **Implement `WTBAuditTrail`** | ✅ DONE | `wtb/infrastructure/events/wtb_audit_trail.py` |
+| | - `WTBAuditEntry` dataclass | | |
+| | - `add_entry()`, `flush()`, `to_dict()` | | |
+| | - `AuditEventListener` for auto-recording | | |
+| | - **Implement `AuditLogRepository`** | ✅ DONE | `wtb/infrastructure/database/repositories/audit_repository.py` |
+| | - Added AuditLogORM, IAuditLogRepository | | |
+| | - 27 unit tests passing | | |
+
+### Afternoon: BatchTestRunner Infrastructure - ✓ DONE
+
+| # | Task | Status | Files Created |
+|---|------|--------|---------------|
+| 3 | **Implement `IBatchTestRunner`** | ✅ DONE | `wtb/domain/interfaces/batch_runner.py` |
+| | - `run_batch_test()`, `get_status()`, `cancel()` | | |
+| | - `IEnvironmentProvider` interface | | |
+| 4 | **Implement `ThreadPoolBatchTestRunner`** | ✅ DONE | `wtb/application/services/batch_test_runner.py` |
+| | - ThreadPoolExecutor with UoW/StateAdapter factories | | |
+| | - Progress tracking, cancellation support | | |
+| | - 7 unit tests passing | | |
+| 5 | **Implement `BatchTestRunnerFactory`** | ✅ DONE | `wtb/application/factories.py` |
+| | - Factory method for ThreadPool/Ray selection | | |
+| | - Config-based switching | | |
+
+### Evening: Ray Foundation - ✓ DONE
+
+| # | Task | Status | Files Created |
+|---|------|--------|---------------|
+| 6 | **Implement `RayConfig`** | ✅ DONE | `wtb/config.py` |
+| | - Dataclass with cluster settings | | |
+| | - `for_local_development()`, `for_production()` presets | | |
+| 7 | **Stub `RayBatchTestRunner`** | ✅ STUB | `wtb/application/services/ray_batch_runner.py` |
+| | - Basic structure with `@ray.remote` decorator | | |
+| | - `VariantExecutionActor` stub | | |
+| 8 | **Create database migrations** | ✅ DONE | `wtb/infrastructure/database/migrations/` |
+| | - `002_batch_tests.sql` (SQLite) | | |
+| | - `003_postgresql_production.sql` (PostgreSQL) | | |
+| 9 | **Implement Environment Providers** | ✅ DONE | `wtb/infrastructure/environment/providers.py` |
+| | - `InProcessEnvironmentProvider` | | |
+| | - `RayEnvironmentProvider` | | |
+| | - `GrpcEnvironmentProvider` (stub) | | |
+
+### Files Created (2025-01-09)
+
+```
+wtb/
+├── domain/
+│   └── interfaces/
+│       └── batch_runner.py          [CREATED] IBatchTestRunner, IEnvironmentProvider
+├── application/
+│   ├── services/
+│       ├── batch_test_runner.py     [CREATED] ThreadPoolBatchTestRunner
+│       └── ray_batch_runner.py      [CREATED] RayBatchTestRunner (stub), VariantExecutionActor
+│   └── factories.py                 [MODIFIED] Added BatchTestRunnerFactory
+├── infrastructure/
+│   ├── events/
+│   │   ├── __init__.py              [CREATED]
+│   │   ├── wtb_event_bus.py         [CREATED] WTBEventBus
+│   │   └── wtb_audit_trail.py       [CREATED] WTBAuditTrail, AuditEventListener
+│   ├── environment/
+│   │   ├── __init__.py              [CREATED]
+│   │   └── providers.py             [CREATED] Ray/InProcess/Grpc providers
+│   └── database/
+│       ├── repositories/
+│       │   └── audit_repository.py  [CREATED] AuditLogRepository
+│       └── migrations/
+│           ├── __init__.py          [CREATED]
+│           ├── 002_batch_tests.sql  [CREATED] Batch test tables
+│           └── 003_postgresql_production.sql [CREATED] PG indexes
+├── config.py                        [MODIFIED] Added RayConfig
+└── tests/
+    └── test_wtb/
+        ├── test_event_bus.py        [CREATED] 20 tests
+        ├── test_audit_trail.py      [CREATED] 24 tests
+        ├── test_audit_repository.py [CREATED] 3 tests
+        └── test_batch_runner.py     [CREATED] 20 tests
+
+Total: 275 tests passing (was 208, +67 new tests)
+```
+
+### Success Criteria - ALL MET ✅
+
+- [x] `WTBEventBus` passes thread-safety tests (20 tests)
+- [x] `WTBAuditTrail` can flush to repository (24 tests)
+- [x] `ThreadPoolBatchTestRunner` can execute simple batch test (7 tests)
+- [x] `BatchTestRunnerFactory` correctly selects runner based on config (3 tests)
+- [x] Database migration files created
+- [x] All new code has test coverage (67 new tests)
+- [x] **AuditLogRepository implemented and tested**
+
+---
+
+## TODO (Backlog)
+
+### P0 - Critical (Ray Batch Test Infrastructure)
+
+| Component                              | Priority | Description                                    | Status |
+| -------------------------------------- | -------- | ---------------------------------------------- | ------ |
+| **RayBatchTestRunner (full)**    | P0       | Complete Ray implementation with ActorPool     | ✅ STUB |
+| **VariantExecutionActor**        | P0       | Ray Actor for workflow variant execution       | ✅ STUB |
+| **ParityChecker**                | P0       | Dry-run validation for ThreadPool→Ray migration| TODO |
+| **PgBouncer Setup**              | P0       | Connection pooling for production              | TODO |
+
+### P1 - High Priority (Supporting Infrastructure)
+
+| Component                              | Priority | Description                                    | Status |
+| -------------------------------------- | -------- | ---------------------------------------------- | ------ |
+| **IEnvironmentProvider**         | P1       | Interface for environment isolation            | ✅ DONE |
+| **RayEnvironmentProvider**       | P1       | Ray runtime_env based isolation                | ✅ DONE |
+| **GrpcEnvironmentProvider**      | P1       | Adapter for colleague's gRPC env-manager       | ✅ STUB |
+| **Prometheus Metrics**           | P1       | Metric export for observability                | TODO |
+| **WAL Mode Config**              | P1       | SQLite concurrent access support               | ✅ DONE |
+| **PostgreSQL Migration**         | P1       | Production database migration scripts          | ✅ DONE |
+
+### P2 - Medium Priority
 
 | Component                              | Priority | Description                                    |
 | -------------------------------------- | -------- | ---------------------------------------------- |
-| **WTBEventBus Implementation**   | HIGH     | Implement Event Bus wrapper with thread-safety |
-| **WTBAuditTrail Implementation** | HIGH     | Implement WTB-level audit trail                |
-| **ParallelExecutionContext**     | HIGH     | Isolated context for parallel batch testing    |
-| **BatchTestRunner (parallel)**   | HIGH     | ThreadPoolExecutor-based parallel execution    |
-| **WAL Mode Config**              | HIGH     | SQLite concurrent access support               |
-| **Parallel Session Tests**       | HIGH     | Test isolation and thread safety               |
-| EvaluationEngine                       | MEDIUM   | Metrics collection & scoring                   |
-| SessionLifecycleManager                | MEDIUM   | Cleanup abandoned sessions                     |
-| Error Hierarchy (P2)                   | MEDIUM   | Standardized error types and handling          |
-| FileTracker Integration                | LOW      | Link checkpoints to file commits               |
-| IDE Sync                               | LOW      | WebSocket events to audit UI                   |
-| AgentGit Integration Tests             | LOW      | Integration tests with real AgentGit database  |
+| EvaluationEngine                       | P2       | Metrics collection & scoring                   |
+| SessionLifecycleManager                | P2       | Cleanup abandoned sessions                     |
+| Error Hierarchy                        | P2       | Standardized error types and handling          |
+| OpenTelemetry Tracing                  | P2       | Distributed tracing integration                |
+| Parallel Session Tests                 | P2       | Test isolation and thread safety               |
+| Ray Integration Tests                  | P2       | Test Ray batch execution end-to-end            |
+
+### P3 - Low Priority
+
+| Component                              | Priority | Description                                    |
+| -------------------------------------- | -------- | ---------------------------------------------- |
+| FileTracker Integration                | P3       | Link checkpoints to file commits               |
+| IDE Sync                               | P3       | WebSocket events to audit UI                   |
+| AgentGit Integration Tests             | P3       | Integration tests with real AgentGit database  |
 
 ## Recently Completed (2024-12-23)
 
@@ -278,6 +516,8 @@ controller = ExecutionControllerFactory.create(config)
 
 ## Next Steps
 
+### Completed ✓
+
 1. ~~Create `AgentGitStateAdapter` to replace `InMemoryStateAdapter`~~ ✓ DONE
 2. ~~Add `InMemoryUnitOfWork` for fast testing~~ ✓ DONE
 3. ~~Create factories for dependency injection~~ ✓ DONE
@@ -286,10 +526,35 @@ controller = ExecutionControllerFactory.create(config)
 6. ~~Implement IntegrityChecker for data integrity~~ ✓ DONE (P0)
 7. ~~Enhance Execution with Rich Domain Model~~ ✓ DONE (P1)
 8. ~~Design Event Bus & Audit Trail integration~~ ✓ DONE (Design)
-9. **Implement `WTBEventBus` and `WTBAuditTrail`** ← NEXT
-10. **Implement `ParallelExecutionContext` and `ParallelContextFactory`** ← NEXT
-11. **Implement `BatchTestRunner` with ThreadPoolExecutor** ← NEXT
-12. **Add SQLite WAL mode configuration** ← NEXT
-13. **Create `test_parallel_sessions.py` for isolation tests** ← NEXT
-14. Implement `EvaluationEngine` for metrics collection
-15. Implement `SessionLifecycleManager` for cleanup
+9. ~~Design Ray-based BatchTestRunner architecture~~ ✓ DONE (2025-01)
+10. ~~Design IEnvironmentProvider interface~~ ✓ DONE (2025-01)
+11. ~~Define data characteristics & indexing strategy~~ ✓ DONE (2025-01)
+12. ~~Implement `WTBEventBus` with thread-safety~~ ✓ DONE (2025-01-09)
+13. ~~Implement `WTBAuditTrail` and `AuditEventListener`~~ ✓ DONE (2025-01-09)
+14. ~~Implement `IBatchTestRunner` interface~~ ✓ DONE (2025-01-09)
+15. ~~Implement `ThreadPoolBatchTestRunner`~~ ✓ DONE (2025-01-09)
+16. ~~Create `BatchTestRunnerFactory`~~ ✓ DONE (2025-01-09)
+17. ~~Add `RayConfig` to `WTBConfig`~~ ✓ DONE (2025-01-09)
+18. ~~Create database migrations for batch test tables~~ ✓ DONE (2025-01-09)
+19. ~~Implement `IEnvironmentProvider` and `RayEnvironmentProvider`~~ ✓ DONE (2025-01-09)
+20. ~~Stub `RayBatchTestRunner` with `VariantExecutionActor`~~ ✓ STUB (2025-01-09)
+21. ~~Implement `IAuditLogRepository` for audit persistence~~ ✓ DONE (2025-01-09)
+
+### In Progress (P0 - Full Ray Implementation)
+
+22. **Complete `RayBatchTestRunner` implementation** ← NEXT
+23. **Complete `VariantExecutionActor` with ExecutionController integration** ← NEXT
+24. **Implement `ParityChecker` for ThreadPool→Ray migration** ← NEXT
+
+### Upcoming (P1)
+
+25. Implement `EvaluationEngine` for metrics collection
+26. Implement `SessionLifecycleManager` for cleanup
+27. Add Prometheus metrics export
+28. Configure PgBouncer for production
+
+### Future (P2-P3)
+
+29. Implement `GrpcEnvironmentProvider` for existing env-manager
+30. Add comprehensive Ray integration tests
+31. IDE sync WebSocket events

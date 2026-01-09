@@ -7,7 +7,15 @@ Follows Interface Segregation Principle with separate read/write interfaces.
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import TypeVar, Generic, Optional, List
+from typing import TypeVar, Generic, Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wtb.domain.models.workflow import TestWorkflow, Execution, NodeVariant
+    from wtb.domain.models.batch_test import BatchTest, EvaluationResult
+    from wtb.domain.models.node_boundary import NodeBoundary
+    from wtb.domain.models.checkpoint_file import CheckpointFile
+    from wtb.domain.models.outbox import OutboxEvent
+    from wtb.infrastructure.events.wtb_audit_trail import WTBAuditEntry
 
 T = TypeVar('T')
 
@@ -284,6 +292,34 @@ class IEvaluationResultRepository(IRepository["EvaluationResult"]):
             
         Returns:
             List of results from that evaluator
+        """
+        pass
+
+
+class IAuditLogRepository(IRepository["WTBAuditEntry"]):
+    """Repository for WTB audit logs (persistence)."""
+    
+    @abstractmethod
+    def append_logs(self, execution_id: str, logs: List["WTBAuditEntry"]) -> None:
+        """
+        Append a batch of logs for an execution.
+        
+        Args:
+            execution_id: Execution identifier
+            logs: List of audit entries to append
+        """
+        pass
+    
+    @abstractmethod
+    def find_by_execution(self, execution_id: str) -> List["WTBAuditEntry"]:
+        """
+        Get all logs for an execution.
+        
+        Args:
+            execution_id: Execution identifier
+            
+        Returns:
+            List of audit entries
         """
         pass
 

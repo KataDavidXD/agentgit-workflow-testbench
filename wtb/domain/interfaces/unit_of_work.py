@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         INodeBoundaryRepository,
         ICheckpointFileRepository,
         IOutboxRepository,
+        IAuditLogRepository,
     )
 
 
@@ -48,6 +49,7 @@ class IUnitOfWork(ABC):
     variants: "INodeVariantRepository"
     batch_tests: "IBatchTestRepository"
     evaluation_results: "IEvaluationResultRepository"
+    audit_logs: "IAuditLogRepository"
     
     # WTB-Specific Repositories (Anti-Corruption Layer)
     node_boundaries: "INodeBoundaryRepository"
