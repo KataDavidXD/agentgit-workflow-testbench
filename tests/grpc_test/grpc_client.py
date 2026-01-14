@@ -2,6 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+
+# 禁用代理，防止流量被转发到 7897 等端口
+os.environ['no_proxy'] = '*'
+os.environ['http_proxy'] = ''
+os.environ['https_proxy'] = ''
+
 import grpc
 
 from src.grpc_generated import env_manager_pb2 as pb2
@@ -12,7 +19,8 @@ async def main():
     """gRPC 客户端使用示例"""
 
     # 连接 gRPC 服务器
-    async with grpc.aio.insecure_channel("localhost:50051") as channel:
+    # Docker 映射后，通过 127.0.0.1 访问
+    async with grpc.aio.insecure_channel("127.0.0.1:50051") as channel:
         stub = pb2_grpc.EnvManagerServiceStub(channel)
 
         # 1. 创建环境
@@ -22,7 +30,7 @@ async def main():
                 workflow_id="wf-001",
                 node_id="node-001",
                 python_version="3.11",
-                packages=["requests", "pandas>=2.0"],
+                packages=["scikit-learn", "pandas>=2.0"],
             )
         )
         print(f"Created: {create_response.env_path}")
