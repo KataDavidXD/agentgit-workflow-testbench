@@ -31,13 +31,14 @@ class ExecutionRepository(BaseRepository[Execution, ExecutionORM], IExecutionRep
             node_results=current_state.get("node_results", {}),
         )
         
+        # v1.6: ORM agentgit_* fields are now String(128), direct mapping
         return Execution(
             id=orm.id,
             workflow_id=orm.workflow_id,
             status=ExecutionStatus(orm.status),
             state=state,
-            agentgit_session_id=orm.agentgit_session_id,
-            agentgit_checkpoint_id=orm.agentgit_checkpoint_id,
+            session_id=orm.agentgit_session_id,
+            checkpoint_id=orm.agentgit_checkpoint_id,
             started_at=orm.started_at,
             completed_at=orm.completed_at,
             created_at=orm.created_at,
@@ -54,6 +55,7 @@ class ExecutionRepository(BaseRepository[Execution, ExecutionORM], IExecutionRep
             "node_results": domain.state.node_results,
         }
         
+        # v1.6: ORM agentgit_* fields are now String(128), direct mapping
         return ExecutionORM(
             id=domain.id,
             workflow_id=domain.workflow_id,
@@ -61,8 +63,8 @@ class ExecutionRepository(BaseRepository[Execution, ExecutionORM], IExecutionRep
             current_node_id=domain.state.current_node_id,
             current_state=json.dumps(current_state),
             execution_path=json.dumps(domain.state.execution_path),
-            agentgit_session_id=domain.agentgit_session_id,
-            agentgit_checkpoint_id=domain.agentgit_checkpoint_id,
+            agentgit_session_id=domain.session_id,
+            agentgit_checkpoint_id=domain.checkpoint_id,
             started_at=domain.started_at,
             completed_at=domain.completed_at,
             created_at=domain.created_at,

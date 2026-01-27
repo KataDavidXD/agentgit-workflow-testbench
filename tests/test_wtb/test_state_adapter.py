@@ -29,8 +29,9 @@ class TestInMemoryStateAdapter:
         state = ExecutionState(current_node_id="start")
         session_id = adapter.initialize_session("exec_1", state)
         
-        assert session_id == 1
-        assert adapter.get_current_session_id() == 1
+        # v1.6: Session IDs are now strings (format: "wtb-{execution_id}")
+        assert session_id == "wtb-exec_1"
+        assert adapter.get_current_session_id() == "wtb-exec_1"
         assert adapter.get_session_count() == 1
     
     def test_initialize_multiple_sessions(self, adapter):
@@ -40,10 +41,11 @@ class TestInMemoryStateAdapter:
         session1 = adapter.initialize_session("exec_1", state)
         session2 = adapter.initialize_session("exec_2", state)
         
-        assert session1 == 1
-        assert session2 == 2
+        # v1.6: Session IDs are now strings
+        assert session1 == "wtb-exec_1"
+        assert session2 == "wtb-exec_2"
         assert adapter.get_session_count() == 2
-        assert adapter.get_current_session_id() == 2  # Last initialized is current
+        assert adapter.get_current_session_id() == "wtb-exec_2"  # Last initialized is current
     
     def test_set_current_session(self, adapter):
         """Test switching between sessions."""
@@ -59,7 +61,8 @@ class TestInMemoryStateAdapter:
     
     def test_set_invalid_session(self, adapter):
         """Test setting an invalid session."""
-        result = adapter.set_current_session(999)
+        # v1.6: Session IDs are strings
+        result = adapter.set_current_session("non-existent-session")
         assert result is False
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -78,7 +81,9 @@ class TestInMemoryStateAdapter:
             name="test_checkpoint"
         )
         
-        assert cp_id == 1
+        # v1.6: Checkpoint IDs are now UUID strings
+        assert isinstance(cp_id, str)
+        assert len(cp_id) == 36  # UUID format
         assert adapter.get_checkpoint_count() == 1
     
     def test_save_checkpoint_without_session_raises(self, adapter):
@@ -131,29 +136,12 @@ class TestInMemoryStateAdapter:
     
     def test_load_invalid_checkpoint_raises(self, adapter):
         """Test loading invalid checkpoint raises error."""
+        # v1.6: Checkpoint IDs are UUID strings
         with pytest.raises(ValueError, match="not found"):
-            adapter.load_checkpoint(999)
+            adapter.load_checkpoint("non-existent-checkpoint-id")
     
-    def test_link_file_commit(self, adapter):
-        """Test linking file commit to checkpoint."""
-        state = ExecutionState()
-        adapter.initialize_session("exec_1", state)
-        
-        cp_id = adapter.save_checkpoint(
-            state=state,
-            node_id="node1",
-            trigger=CheckpointTrigger.AUTO
-        )
-        
-        result = adapter.link_file_commit(cp_id, "file_commit_abc", file_count=5)
-        
-        assert result is True
-        assert adapter.get_file_commit(cp_id) == "file_commit_abc"
-    
-    def test_link_file_commit_invalid_checkpoint(self, adapter):
-        """Test linking to invalid checkpoint returns False."""
-        result = adapter.link_file_commit(999, "file_commit_abc")
-        assert result is False
+    # NOTE: link_file_commit was removed in v1.6 - AgentGit-specific file commit linking
+    # Use file_processing module for file tracking instead
     
     def test_get_checkpoints(self, adapter):
         """Test getting checkpoints for a session."""
@@ -182,7 +170,9 @@ class TestInMemoryStateAdapter:
         cp_id = adapter.save_checkpoint(state, "node1", CheckpointTrigger.AUTO)
         boundary_id = adapter.mark_node_started("node1", cp_id)
         
-        assert boundary_id == 1
+        # v1.6: Boundary IDs are now UUID strings
+        assert isinstance(boundary_id, str)
+        assert len(boundary_id) == 36  # UUID format
         
         boundaries = adapter.get_node_boundaries(session_id)
         assert len(boundaries) == 1
@@ -198,14 +188,14 @@ class TestInMemoryStateAdapter:
         adapter.mark_node_started("node1", entry_cp)
         
         exit_cp = adapter.save_checkpoint(state, "node1", CheckpointTrigger.AUTO)
-        result = adapter.mark_node_completed("node1", exit_cp, tool_count=2, checkpoint_count=2)
+        # v1.6: mark_node_completed no longer takes tool_count/checkpoint_count parameters
+        result = adapter.mark_node_completed("node1", exit_cp)
         
         assert result is True
         
         boundary = adapter.get_node_boundary(session_id, "node1")
         assert boundary.node_status == "completed"
         assert boundary.exit_checkpoint_id == exit_cp
-        assert boundary.tool_count == 2
     
     def test_mark_node_failed(self, adapter):
         """Test marking a node as failed."""
@@ -280,26 +270,10 @@ class TestInMemoryStateAdapter:
     
     def test_rollback_invalid_checkpoint(self, adapter):
         """Test rollback to invalid checkpoint."""
+        # v1.6: Checkpoint IDs are UUID strings
         with pytest.raises(ValueError, match="not found"):
-            adapter.rollback(999)
+            adapter.rollback("non-existent-checkpoint-id")
     
-    def test_create_branch(self, adapter):
-        """Test creating a branch from a checkpoint."""
-        state = ExecutionState(current_node_id="node1")
-        adapter.initialize_session("exec_1", state)
-        
-        cp_id = adapter.save_checkpoint(state, "node1", CheckpointTrigger.AUTO)
-        
-        new_session_id = adapter.create_branch(cp_id)
-        
-        assert new_session_id == 2
-        assert adapter.get_current_session_id() == new_session_id
-        assert adapter.get_session_count() == 2
-    
-    def test_create_branch_invalid_checkpoint(self, adapter):
-        """Test branching from invalid checkpoint."""
-        with pytest.raises(ValueError, match="not found"):
-            adapter.create_branch(999)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Cleanup Tests

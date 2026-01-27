@@ -8,7 +8,13 @@ from .models import (
     BatchTestORM,
     EvaluationResultORM,
     NodeBoundaryORM,
-    CheckpointFileORM,
+    # CheckpointFileORM DEPRECATED (2026-01-27) - Use CheckpointFileLinkORM from file_processing_orm
+)
+from .file_processing_orm import (
+    CheckpointFileLinkORM,  # PRIMARY: Use this for checkpoint-file links
+    FileBlobORM,
+    FileCommitORM,
+    FileMementoORM,
 )
 from .unit_of_work import SQLAlchemyUnitOfWork
 from .inmemory_unit_of_work import InMemoryUnitOfWork
@@ -29,7 +35,7 @@ from .setup import (
 )
 
 __all__ = [
-    # Models
+    # Core Models
     "Base",
     "WorkflowORM",
     "ExecutionORM",
@@ -37,7 +43,11 @@ __all__ = [
     "BatchTestORM",
     "EvaluationResultORM",
     "NodeBoundaryORM",
-    "CheckpointFileORM",
+    # File Processing Models (PRIMARY - 2026-01-27)
+    "CheckpointFileLinkORM",
+    "FileBlobORM",
+    "FileCommitORM",
+    "FileMementoORM",
     # UoW
     "SQLAlchemyUnitOfWork",
     "InMemoryUnitOfWork",

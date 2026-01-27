@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from wtb.domain.models.workflow import TestWorkflow, Execution, NodeVariant
     from wtb.domain.models.batch_test import BatchTest, EvaluationResult
     from wtb.domain.models.node_boundary import NodeBoundary
-    from wtb.domain.models.checkpoint_file import CheckpointFile
+    # CheckpointFile REMOVED (2026-01-27) - Use CheckpointFileLink from file_processing
     from wtb.domain.models.outbox import OutboxEvent
     from wtb.infrastructure.events.wtb_audit_trail import WTBAuditEntry
 
@@ -151,6 +151,18 @@ class IWorkflowRepository(IRepository["TestWorkflow"]):
             
         Returns:
             TestWorkflow if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    def list_all(self) -> List["TestWorkflow"]:
+        """
+        List all workflows without pagination.
+        
+        Use sparingly - prefer list(limit, offset) for large datasets.
+        
+        Returns:
+            List of all workflows
         """
         pass
 
@@ -325,15 +337,21 @@ class IAuditLogRepository(IRepository["WTBAuditEntry"]):
 
 
 class INodeBoundaryRepository(IRepository["NodeBoundary"]):
-    """Repository for NodeBoundary entities (WTB-specific)."""
+    """
+    Repository for NodeBoundary entities (WTB-specific).
+    
+    Updated 2026-01-15 for DDD compliance:
+    - Changed from internal_session_id to execution_id
+    - Added execution-based query methods
+    """
     
     @abstractmethod
-    def find_by_session(self, internal_session_id: int) -> List["NodeBoundary"]:
+    def find_by_execution(self, execution_id: str) -> List["NodeBoundary"]:
         """
-        Find all boundaries for a session.
+        Find all boundaries for an execution.
         
         Args:
-            internal_session_id: AgentGit session ID
+            execution_id: WTB execution ID
             
         Returns:
             List of node boundaries
@@ -341,12 +359,12 @@ class INodeBoundaryRepository(IRepository["NodeBoundary"]):
         pass
     
     @abstractmethod
-    def find_by_node(self, internal_session_id: int, node_id: str) -> Optional["NodeBoundary"]:
+    def find_by_execution_and_node(self, execution_id: str, node_id: str) -> Optional["NodeBoundary"]:
         """
-        Find boundary for a specific node.
+        Find boundary for a specific node in an execution.
         
         Args:
-            internal_session_id: AgentGit session ID
+            execution_id: WTB execution ID
             node_id: Workflow node ID
             
         Returns:
@@ -355,12 +373,12 @@ class INodeBoundaryRepository(IRepository["NodeBoundary"]):
         pass
     
     @abstractmethod
-    def find_completed(self, internal_session_id: int) -> List["NodeBoundary"]:
+    def find_completed_by_execution(self, execution_id: str) -> List["NodeBoundary"]:
         """
-        Find completed node boundaries (for rollback targets).
+        Find completed node boundaries for an execution (for rollback targets).
         
         Args:
-            internal_session_id: AgentGit session ID
+            execution_id: WTB execution ID
             
         Returns:
             List of completed node boundaries
@@ -368,34 +386,13 @@ class INodeBoundaryRepository(IRepository["NodeBoundary"]):
         pass
 
 
-class ICheckpointFileRepository(IRepository["CheckpointFile"]):
-    """Repository for CheckpointFile links (WTB-specific)."""
-    
-    @abstractmethod
-    def find_by_checkpoint(self, checkpoint_id: int) -> Optional["CheckpointFile"]:
-        """
-        Find file link for a checkpoint.
-        
-        Args:
-            checkpoint_id: AgentGit checkpoint ID
-            
-        Returns:
-            CheckpointFile if linked, None otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def find_by_file_commit(self, file_commit_id: str) -> List["CheckpointFile"]:
-        """
-        Find all checkpoints linked to a file commit.
-        
-        Args:
-            file_commit_id: FileTracker commit UUID
-            
-        Returns:
-            List of checkpoint-file links
-        """
-        pass
+# Legacy methods REMOVED (2026-01-27):
+# - find_by_session() → Use find_by_execution()
+# - find_by_node() → Use find_by_execution_and_node()
+# - find_completed() → Use find_completed_by_execution()
+
+# ICheckpointFileRepository REMOVED (2026-01-27)
+# Use ICheckpointFileLinkRepository from file_processing_repository instead
 
 
 class IOutboxRepository(ABC):

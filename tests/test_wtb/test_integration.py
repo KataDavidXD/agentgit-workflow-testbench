@@ -2,6 +2,11 @@
 Integration Tests for WTB.
 
 Tests end-to-end scenarios using all components together.
+
+Quality Improvements (2026-01-16):
+- Added contextual assertion helpers
+- Improved error messages for debugging
+- One-shot breakpoint semantic support
 """
 
 import pytest
@@ -23,6 +28,12 @@ from wtb.domain.interfaces.state_adapter import CheckpointTrigger
 from wtb.infrastructure.adapters.inmemory_state_adapter import InMemoryStateAdapter
 from wtb.application.services.execution_controller import ExecutionController
 from wtb.application.services.node_replacer import NodeReplacer
+
+# Test helpers for better assertions
+from tests.helpers.assertions import (
+    assert_execution_completed,
+    assert_execution_paused,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -117,6 +128,10 @@ class InMemoryWorkflowRepository(IWorkflowRepository):
             if w.name == name and w.version == version:
                 return w
         return None
+    
+    def list_all(self) -> List[TestWorkflow]:
+        """List all workflows without pagination."""
+        return list(self._storage.values())
 
 
 class InMemoryNodeVariantRepository(INodeVariantRepository):
@@ -285,29 +300,31 @@ class TestSimpleWorkflowExecution:
         )
         
         # Verify initial state
-        assert execution.status == ExecutionStatus.PENDING
-        assert execution.state.current_node_id == "start"
+        assert execution.status == ExecutionStatus.PENDING, \
+            f"New execution should be PENDING, got {execution.status}"
+        assert execution.state.current_node_id == "start", \
+            f"Should start at 'start' node, got {execution.state.current_node_id}"
         assert execution.state.workflow_variables["run_id"] == "test_001"
         
         # Run the workflow
         completed = controller.run(execution.id)
         
-        # Verify completion
-        assert completed.status == ExecutionStatus.COMPLETED
-        assert completed.completed_at is not None
-        
-        # Verify execution path
-        path = completed.state.execution_path
-        assert path == ["start", "fetch", "transform", "end"]
+        # Verify completion with contextual helper
+        assert_execution_completed(
+            completed,
+            expected_path=["start", "fetch", "transform", "end"],
+        )
+        assert completed.completed_at is not None, \
+            "completed_at timestamp should be set"
         
         # Verify node results exist
-        assert "start" in completed.state.node_results
-        assert "fetch" in completed.state.node_results
-        assert "transform" in completed.state.node_results
-        assert "end" in completed.state.node_results
+        expected_nodes = {"start", "fetch", "transform", "end"}
+        actual_nodes = set(completed.state.node_results.keys())
+        missing = expected_nodes - actual_nodes
+        assert not missing, f"Missing node results: {missing}"
         
         # Verify checkpoints were created
-        session_id = completed.agentgit_session_id
+        session_id = completed.session_id
         checkpoints = state_adapter.get_checkpoints(session_id)
         assert len(checkpoints) >= 8  # At least 2 per node (entry + exit)
         
@@ -341,8 +358,8 @@ class TestSimpleWorkflowExecution:
         assert "fetch" in paused.state.execution_path
         assert "transform" not in paused.state.execution_path
         
-        # Modify state while paused
-        paused.breakpoints.remove("transform")
+        # Breakpoint is auto-removed after triggering (one-shot semantic)
+        assert "transform" not in paused.breakpoints, "Breakpoint should be removed after triggering"
         
         # Resume with modified variables
         completed = controller.resume(
@@ -373,7 +390,7 @@ class TestSimpleWorkflowExecution:
         
         # Run to breakpoint
         paused = controller.run(execution.id)
-        session_id = paused.agentgit_session_id
+        session_id = paused.session_id
         
         # Get checkpoint at the breakpoint
         checkpoints = state_adapter.get_checkpoints(session_id)
@@ -727,7 +744,7 @@ class TestErrorHandlingAndRecovery:
         execution = controller.create_execution(workflow, breakpoints=["action"])
         paused = controller.run(execution.id)
         
-        session_id = paused.agentgit_session_id
+        session_id = paused.session_id
         
         # Verify checkpoints exist
         checkpoints = state_adapter.get_checkpoints(session_id)

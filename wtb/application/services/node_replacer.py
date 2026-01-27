@@ -2,14 +2,23 @@
 Node Replacer Implementation.
 
 Manages node variants for A/B testing and hot-swapping.
+
+ARCHITECTURE NOTE (2026-01-17):
+    Services receive an ALREADY-OPENED UoW context from the factory.
+    Services should NOT use `with self._uow:` as this closes the session.
+    Instead, services access repositories directly and call commit() explicitly.
+    This ensures ACID compliance for all write operations.
 """
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, TYPE_CHECKING
 from copy import deepcopy
 
 from wtb.domain.interfaces.node_replacer import INodeReplacer
 from wtb.domain.interfaces.repositories import INodeVariantRepository
 from wtb.domain.models import NodeVariant, WorkflowNode, TestWorkflow
+
+if TYPE_CHECKING:
+    from wtb.domain.interfaces.unit_of_work import IUnitOfWork
 
 
 class NodeReplacer(INodeReplacer):
@@ -21,27 +30,42 @@ class NodeReplacer(INodeReplacer):
     - Hot-swap nodes in workflows
     - Apply variant sets for batch testing
     - Track original nodes for restoration
+    
+    ACID Compliance:
+    - Receives UoW reference for transaction management
+    - Calls commit() at transaction boundaries for durability
     """
     
-    def __init__(self, variant_repository: INodeVariantRepository):
+    def __init__(
+        self, 
+        variant_repository: INodeVariantRepository,
+        unit_of_work: Optional["IUnitOfWork"] = None,
+    ):
         """
         Initialize the node replacer.
         
         Args:
             variant_repository: Repository for persisting variants
+            unit_of_work: Optional UoW for transaction management (ACID compliance)
         """
         self._variant_repo = variant_repository
+        self._uow = unit_of_work
         
         # Cache original nodes for restoration
         # workflow_id -> {node_id -> original WorkflowNode}
         self._original_cache: Dict[str, Dict[str, WorkflowNode]] = {}
+    
+    def _commit(self) -> None:
+        """Commit UoW transaction if available (ACID compliance)."""
+        if self._uow is not None:
+            self._uow.commit()
     
     # ═══════════════════════════════════════════════════════════════════════════
     # IVariantRegistry Implementation
     # ═══════════════════════════════════════════════════════════════════════════
     
     def register(self, variant: NodeVariant) -> NodeVariant:
-        """Register a new node variant."""
+        """Register a new node variant with ACID transaction."""
         # Validate variant
         if not variant.original_node_id:
             raise ValueError("Variant must specify original_node_id")
@@ -56,7 +80,9 @@ class NodeReplacer(INodeReplacer):
                     f"Variant '{variant.variant_name}' already exists for node {variant.original_node_id}"
                 )
         
-        return self._variant_repo.add(variant)
+        result = self._variant_repo.add(variant)
+        self._commit()  # ACID: Commit at transaction boundary
+        return result
     
     def get(self, variant_id: str) -> Optional[NodeVariant]:
         """Get a variant by ID."""
@@ -71,13 +97,14 @@ class NodeReplacer(INodeReplacer):
         return self._variant_repo.find_by_workflow(workflow_id)
     
     def deactivate(self, variant_id: str) -> bool:
-        """Deactivate a variant."""
+        """Deactivate a variant with ACID transaction."""
         variant = self._variant_repo.get(variant_id)
         if not variant:
             return False
         
         variant.is_active = False
         self._variant_repo.update(variant)
+        self._commit()  # ACID: Commit at transaction boundary
         return True
     
     # ═══════════════════════════════════════════════════════════════════════════

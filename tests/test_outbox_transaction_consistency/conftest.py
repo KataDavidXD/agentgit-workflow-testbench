@@ -1,0 +1,657 @@
+"""
+Pytest fixtures for Outbox Transaction Consistency tests.
+
+REFACTORED (2026-01-27): Uses REAL services instead of mocks:
+- SQLite-based WTBTestBench with real checkpoint persistence
+- Real OutboxProcessor with transaction verification
+- Real FileTracker integration (when available)
+- Real LangGraph checkpointer
+
+Design Principles:
+- DIP: Fixtures provide real implementations via dependency injection
+- ISP: Separate fixtures for each concern
+- ACID: Tests verify real transaction consistency
+
+Run with: pytest tests/test_outbox_transaction_consistency/ -v
+"""
+
+import pytest
+import tempfile
+import uuid
+import shutil
+from typing import List, Dict, Any, Optional, Generator
+from datetime import datetime
+from pathlib import Path
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+# WTB SDK imports
+from wtb.sdk import (
+    WTBTestBench,
+    WorkflowProject,
+    FileTrackingConfig,
+    EnvironmentConfig,
+    ExecutionConfig,
+    EnvSpec,
+)
+from wtb.application.factories import WTBTestBenchFactory
+
+# WTB Infrastructure imports
+from wtb.infrastructure.outbox import (
+    OutboxProcessor,
+    OutboxLifecycleManager,
+    create_managed_processor,
+)
+from wtb.infrastructure.database.unit_of_work import SQLAlchemyUnitOfWork
+from wtb.infrastructure.events import WTBEventBus, WTBAuditTrail
+
+# Import helpers
+from tests.test_outbox_transaction_consistency.helpers import (
+    # States
+    SimpleState,
+    TransactionState,
+    FileTrackingState,
+    PauseResumeState,
+    BranchState,
+    RollbackState,
+    BatchTestState,
+    ParallelExecutionState,
+    VenvState,
+    FullIntegrationState,
+    # State factories
+    create_simple_state,
+    create_transaction_state,
+    create_file_tracking_state,
+    create_pause_resume_state,
+    create_branch_state,
+    create_rollback_state,
+    create_batch_test_state,
+    create_parallel_state,
+    create_venv_state,
+    create_full_integration_state,
+    # Node functions
+    node_a,
+    node_b,
+    node_c,
+    node_d,
+    failing_node,
+    transaction_node,
+    file_processing_node,
+    branch_node_a,
+    branch_node_b,
+    branch_node_c,
+    branch_node_d,
+    venv_setup_node,
+    venv_install_node,
+    parallel_worker_node,
+    aggregator_node,
+    # Routing
+    route_by_switch,
+    route_by_count,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Real Database Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def temp_data_dir(tmp_path) -> Generator[Path, None, None]:
+    """Create temporary data directory for real SQLite databases."""
+    data_dir = tmp_path / "wtb_test_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    yield data_dir
+    # Cleanup handled by tmp_path
+
+
+@pytest.fixture
+def wtb_db_url(temp_data_dir) -> str:
+    """Create real WTB SQLite database URL."""
+    db_path = temp_data_dir / "wtb.db"
+    return f"sqlite:///{db_path}"
+
+
+@pytest.fixture
+def checkpoint_db_path(temp_data_dir) -> Path:
+    """Create path for SQLite checkpoint database."""
+    return temp_data_dir / "checkpoints.db"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Real WTB TestBench Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def wtb_bench_development(temp_data_dir) -> WTBTestBench:
+    """
+    Create WTBTestBench with real SQLite persistence.
+    
+    Uses 'development' mode for:
+    - SQLite checkpoint persistence
+    - Real UnitOfWork transactions
+    - File tracking support (optional)
+    """
+    return WTBTestBench.create(
+        mode="development",
+        data_dir=str(temp_data_dir),
+        enable_file_tracking=False,  # Can be enabled for specific tests
+    )
+
+
+@pytest.fixture
+def wtb_bench_with_file_tracking(temp_data_dir) -> WTBTestBench:
+    """
+    Create WTBTestBench with real SQLite and file tracking enabled.
+    """
+    return WTBTestBench.create(
+        mode="development",
+        data_dir=str(temp_data_dir),
+        enable_file_tracking=True,
+    )
+
+
+@pytest.fixture
+def wtb_bench_testing() -> WTBTestBench:
+    """
+    Create WTBTestBench with in-memory backend for fast tests.
+    
+    Uses 'testing' mode for:
+    - In-memory checkpointer
+    - Fast execution
+    - No disk I/O
+    """
+    return WTBTestBenchFactory.create_for_testing()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Real Outbox Processor Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def outbox_processor_db_url(temp_data_dir) -> str:
+    """Create separate database URL for outbox processor to avoid conflicts."""
+    db_path = temp_data_dir / "outbox_processor.db"
+    return f"sqlite:///{db_path}"
+
+
+@pytest.fixture
+def outbox_processor(outbox_processor_db_url) -> Generator[OutboxProcessor, None, None]:
+    """
+    Create real OutboxProcessor with SQLite backend.
+    
+    Uses separate database to avoid conflicts with wtb_bench fixtures.
+    
+    The processor will:
+    - Poll wtb_outbox table for pending events
+    - Execute verification handlers
+    - Track verification statistics
+    """
+    # Initialize the database first
+    with SQLAlchemyUnitOfWork(outbox_processor_db_url) as uow:
+        uow.commit()
+    
+    processor = OutboxProcessor(
+        wtb_db_url=outbox_processor_db_url,
+        poll_interval_seconds=0.1,  # Fast polling for tests
+        batch_size=10,
+        strict_verification=False,  # Don't fail on missing repos
+    )
+    yield processor
+    # Cleanup - ensure processor is stopped
+    if processor.is_running():
+        processor.stop(timeout=2.0)
+
+
+@pytest.fixture
+def lifecycle_manager_db_url(temp_data_dir) -> str:
+    """Create separate database URL for lifecycle manager to avoid conflicts."""
+    db_path = temp_data_dir / "lifecycle_manager.db"
+    return f"sqlite:///{db_path}"
+
+
+@pytest.fixture
+def outbox_lifecycle_manager(lifecycle_manager_db_url) -> Generator[OutboxLifecycleManager, None, None]:
+    """
+    Create real OutboxLifecycleManager with managed lifecycle.
+    
+    Uses separate database to avoid conflicts.
+    """
+    # Initialize the database first
+    with SQLAlchemyUnitOfWork(lifecycle_manager_db_url) as uow:
+        uow.commit()
+    
+    manager = OutboxLifecycleManager(
+        wtb_db_url=lifecycle_manager_db_url,
+        poll_interval_seconds=0.1,
+        auto_start=False,  # Start manually in tests
+        register_signals=False,  # Don't register signal handlers in tests
+    )
+    yield manager
+    # Cleanup
+    manager.shutdown(timeout=2.0)
+
+
+@pytest.fixture
+def running_outbox_processor(outbox_processor) -> Generator[OutboxProcessor, None, None]:
+    """
+    Create and start a real OutboxProcessor.
+    """
+    outbox_processor.start()
+    yield outbox_processor
+    outbox_processor.stop(timeout=2.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Real Unit of Work Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def unit_of_work(wtb_db_url) -> Generator[SQLAlchemyUnitOfWork, None, None]:
+    """
+    Create real SQLAlchemy Unit of Work for transaction testing.
+    """
+    with SQLAlchemyUnitOfWork(wtb_db_url) as uow:
+        yield uow
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LangGraph Graph Definition Fixtures (Same as before)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def simple_graph_def() -> StateGraph:
+    """Create simple linear graph: A -> B -> C -> END."""
+    workflow = StateGraph(SimpleState)
+    
+    workflow.add_node("node_a", node_a)
+    workflow.add_node("node_b", node_b)
+    workflow.add_node("node_c", node_c)
+    
+    workflow.set_entry_point("node_a")
+    workflow.add_edge("node_a", "node_b")
+    workflow.add_edge("node_b", "node_c")
+    workflow.add_edge("node_c", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def transaction_graph_def() -> StateGraph:
+    """Create graph with transaction tracking."""
+    workflow = StateGraph(TransactionState)
+    
+    workflow.add_node("node_a", lambda s: {
+        "messages": ["A"],
+        "count": s["count"] + 1,
+        "transaction_log": [f"start-{datetime.now().isoformat()}"],
+    })
+    workflow.add_node("node_b", transaction_node)
+    workflow.add_node("node_c", lambda s: {
+        "messages": ["C"],
+        "count": s["count"] + 1,
+        "transaction_log": [f"end-{datetime.now().isoformat()}"],
+    })
+    
+    workflow.set_entry_point("node_a")
+    workflow.add_edge("node_a", "node_b")
+    workflow.add_edge("node_b", "node_c")
+    workflow.add_edge("node_c", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def file_tracking_graph_def() -> StateGraph:
+    """Create graph for file tracking tests."""
+    workflow = StateGraph(FileTrackingState)
+    
+    workflow.add_node("ingest", lambda s: {
+        "messages": ["Ingested"],
+        "count": s["count"] + 1,
+        "files_processed": ["input.csv"],
+    })
+    workflow.add_node("process", file_processing_node)
+    workflow.add_node("save", lambda s: {
+        "messages": ["Saved"],
+        "count": s["count"] + 1,
+        "commit_ids": [f"commit_{len(s.get('files_processed', []))}"],
+    })
+    
+    workflow.set_entry_point("ingest")
+    workflow.add_edge("ingest", "process")
+    workflow.add_edge("process", "save")
+    workflow.add_edge("save", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def branching_graph_def() -> StateGraph:
+    """Create branching graph: A -> B -> (C or D) -> END."""
+    workflow = StateGraph(BranchState)
+    
+    workflow.add_node("node_a", branch_node_a)
+    workflow.add_node("node_b", branch_node_b)
+    workflow.add_node("node_c", branch_node_c)
+    workflow.add_node("node_d", branch_node_d)
+    
+    workflow.set_entry_point("node_a")
+    workflow.add_edge("node_a", "node_b")
+    workflow.add_conditional_edges("node_b", route_by_switch)
+    workflow.add_edge("node_c", END)
+    workflow.add_edge("node_d", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def pause_resume_graph_def() -> StateGraph:
+    """Create graph for pause/resume tests."""
+    workflow = StateGraph(PauseResumeState)
+    
+    workflow.add_node("start", lambda s: {
+        "messages": ["Started"],
+        "count": s["count"] + 1,
+    })
+    workflow.add_node("process", lambda s: {
+        "messages": ["Processing"],
+        "count": s["count"] + 1,
+    })
+    workflow.add_node("checkpoint", lambda s: {
+        "messages": ["Checkpointed"],
+        "count": s["count"] + 1,
+        "pause_checkpoint_id": s["count"] + 1,
+    })
+    workflow.add_node("complete", lambda s: {
+        "messages": ["Completed"],
+        "count": s["count"] + 1,
+    })
+    
+    workflow.set_entry_point("start")
+    workflow.add_edge("start", "process")
+    workflow.add_edge("process", "checkpoint")
+    workflow.add_edge("checkpoint", "complete")
+    workflow.add_edge("complete", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def venv_graph_def() -> StateGraph:
+    """Create graph for venv integration tests."""
+    workflow = StateGraph(VenvState)
+    
+    workflow.add_node("setup", venv_setup_node)
+    workflow.add_node("install", venv_install_node)
+    workflow.add_node("execute", lambda s: {
+        "messages": ["Executed"],
+        "count": s["count"] + 1,
+        "venv_status": "executed",
+    })
+    
+    workflow.set_entry_point("setup")
+    workflow.add_edge("setup", "install")
+    workflow.add_edge("install", "execute")
+    workflow.add_edge("execute", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def failing_graph_def() -> StateGraph:
+    """Create graph with a failing node."""
+    workflow = StateGraph(SimpleState)
+    
+    workflow.add_node("node_a", node_a)
+    workflow.add_node("failing_node", failing_node)
+    workflow.add_node("node_b", node_b)
+    
+    workflow.set_entry_point("node_a")
+    workflow.add_edge("node_a", "failing_node")
+    workflow.add_edge("failing_node", "node_b")
+    workflow.add_edge("node_b", END)
+    
+    return workflow
+
+
+@pytest.fixture
+def batch_test_graph_def() -> StateGraph:
+    """Create graph for batch testing."""
+    workflow = StateGraph(BatchTestState)
+    
+    workflow.add_node("setup", lambda s: {
+        "messages": ["Setup"],
+        "count": s["count"] + 1,
+    })
+    workflow.add_node("execute", lambda s: {
+        "messages": ["Executed"],
+        "count": s["count"] + 1,
+        "execution_result": f"result_{s['variant_name']}",
+    })
+    workflow.add_node("evaluate", lambda s: {
+        "messages": ["Evaluated"],
+        "count": s["count"] + 1,
+    })
+    
+    workflow.set_entry_point("setup")
+    workflow.add_edge("setup", "execute")
+    workflow.add_edge("execute", "evaluate")
+    workflow.add_edge("evaluate", END)
+    
+    return workflow
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Checkpointer Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def memory_checkpointer() -> MemorySaver:
+    """Create in-memory checkpointer."""
+    return MemorySaver()
+
+
+@pytest.fixture
+def sqlite_checkpointer(checkpoint_db_path) -> Generator[SqliteSaver, None, None]:
+    """Create real SQLite checkpointer."""
+    # SqliteSaver from langgraph.checkpoint.sqlite
+    conn_string = f"sqlite:///{checkpoint_db_path}"
+    with SqliteSaver.from_conn_string(conn_string) as saver:
+        yield saver
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Compiled Graph Fixtures with Real Checkpointer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def simple_compiled_graph(simple_graph_def, memory_checkpointer):
+    """Create compiled simple graph with checkpointer."""
+    return simple_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def transaction_compiled_graph(transaction_graph_def, memory_checkpointer):
+    """Create compiled transaction graph with checkpointer."""
+    return transaction_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def file_tracking_compiled_graph(file_tracking_graph_def, memory_checkpointer):
+    """Create compiled file tracking graph with checkpointer."""
+    return file_tracking_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def branching_compiled_graph(branching_graph_def, memory_checkpointer):
+    """Create compiled branching graph with checkpointer."""
+    return branching_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def pause_resume_compiled_graph(pause_resume_graph_def, memory_checkpointer):
+    """Create compiled pause/resume graph with checkpointer."""
+    return pause_resume_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def venv_compiled_graph(venv_graph_def, memory_checkpointer):
+    """Create compiled venv graph with checkpointer."""
+    return venv_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+@pytest.fixture
+def batch_test_compiled_graph(batch_test_graph_def, memory_checkpointer):
+    """Create compiled batch test graph with checkpointer."""
+    return batch_test_graph_def.compile(checkpointer=memory_checkpointer)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WorkflowProject Fixtures for SDK Integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def simple_project(simple_graph_def) -> WorkflowProject:
+    """Create simple WorkflowProject for SDK tests."""
+    return WorkflowProject(
+        name="simple_test_project",
+        graph_factory=lambda: simple_graph_def,
+        description="Simple test workflow for outbox testing",
+    )
+
+
+@pytest.fixture
+def transaction_project(transaction_graph_def) -> WorkflowProject:
+    """Create transaction-aware WorkflowProject."""
+    return WorkflowProject(
+        name="transaction_test_project",
+        graph_factory=lambda: transaction_graph_def,
+        description="Transaction consistency test workflow",
+    )
+
+
+@pytest.fixture
+def file_tracking_project(file_tracking_graph_def, temp_data_dir) -> WorkflowProject:
+    """Create WorkflowProject with file tracking enabled."""
+    tracked_dir = temp_data_dir / "tracked_files"
+    tracked_dir.mkdir(parents=True, exist_ok=True)
+    
+    return WorkflowProject(
+        name="file_tracking_test_project",
+        graph_factory=lambda: file_tracking_graph_def,
+        description="File tracking integration test workflow",
+        file_tracking=FileTrackingConfig(
+            enabled=True,
+            tracked_paths=[str(tracked_dir)],
+            auto_commit=True,
+            commit_on="checkpoint",
+        ),
+    )
+
+
+@pytest.fixture
+def pause_resume_project(pause_resume_graph_def) -> WorkflowProject:
+    """Create WorkflowProject for pause/resume tests."""
+    return WorkflowProject(
+        name="pause_resume_test_project",
+        graph_factory=lambda: pause_resume_graph_def,
+        description="Pause/resume test workflow",
+    )
+
+
+@pytest.fixture
+def branching_project(branching_graph_def) -> WorkflowProject:
+    """Create WorkflowProject for branching/fork tests."""
+    return WorkflowProject(
+        name="branching_test_project",
+        graph_factory=lambda: branching_graph_def,
+        description="Branching/forking test workflow",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Event System Fixtures (Real Implementations)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def event_bus():
+    """Create real WTB event bus."""
+    return WTBEventBus(max_history=1000)
+
+
+@pytest.fixture
+def audit_trail():
+    """Create real audit trail."""
+    return WTBAuditTrail()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Execution Context Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def execution_context():
+    """Create standard execution context."""
+    execution_id = f"exec-{uuid.uuid4().hex[:8]}"
+    thread_id = f"wtb-{execution_id}"
+    batch_test_id = f"bt-{uuid.uuid4().hex[:8]}"
+    
+    return {
+        "execution_id": execution_id,
+        "thread_id": thread_id,
+        "batch_test_id": batch_test_id,
+        "config": {"configurable": {"thread_id": thread_id}},
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test Data Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def test_files(tmp_path) -> Dict[str, Dict[str, Any]]:
+    """Create temporary test files."""
+    files = {}
+    test_data = [
+        ("data.csv", b"id,name,value\n1,Alice,100\n2,Bob,200"),
+        ("model.pkl", b"PICKLE_BINARY_MODEL_DATA_PLACEHOLDER"),
+        ("config.json", b'{"setting": "value", "enabled": true}'),
+    ]
+    
+    for name, content in test_data:
+        path = tmp_path / name
+        path.write_bytes(content)
+        files[name] = {
+            "path": str(path),
+            "content": content,
+            "size": len(content),
+        }
+    
+    return files
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cleanup Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=True)
+def cleanup_after_test():
+    """Cleanup after each test."""
+    yield
+    # Any cleanup logic here
+    import gc
+    gc.collect()

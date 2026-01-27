@@ -335,14 +335,13 @@ class TestIntegrityChecker:
         db_file = tmp_path / "test.db"
         db_url = f"sqlite:///{db_file}"
         
-        # Create database with node boundary
+        # Create database with node boundary (Updated 2026-01-15 for DDD compliance)
         with SQLAlchemyUnitOfWork(db_url) as uow:
-            boundary = NodeBoundary(
+            boundary = NodeBoundary.create_for_node(
                 execution_id="exec-1",
-                internal_session_id=1,
                 node_id="train",
-                entry_checkpoint_id=999  # Non-existent in mock
             )
+            boundary.start(entry_checkpoint_id="cp-999")  # Non-existent in mock
             uow.node_boundaries.add(boundary)
             uow.commit()
         

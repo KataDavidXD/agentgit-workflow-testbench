@@ -93,9 +93,10 @@ class ExecutionORM(Base):
     current_state = Column(Text, nullable=True)
     execution_path = Column(Text, nullable=True)  # JSON: list of node IDs
     
-    # AgentGit integration (cross-database references)
-    agentgit_session_id = Column(Integer, nullable=True)
-    agentgit_checkpoint_id = Column(Integer, nullable=True)
+    # Session/Checkpoint IDs (v1.6: now String UUIDs, previously Integer AgentGit refs)
+    # NOTE: Column names kept as agentgit_* for migration compatibility
+    agentgit_session_id = Column(String(128), nullable=True)
+    agentgit_checkpoint_id = Column(String(128), nullable=True)
     
     # Timing
     started_at = Column(DateTime, nullable=True)
@@ -245,15 +246,15 @@ class NodeBoundaryORM(Base):
     # WTB Execution Context
     execution_id = Column(String(64), nullable=False)
     
-    # AgentGit Reference (cross-database, logical FK)
-    internal_session_id = Column(Integer, nullable=False)
+    # Session Reference (v1.6: now String UUID, previously Integer AgentGit ref)
+    internal_session_id = Column(String(128), nullable=False)
     
     # Node Identification
     node_id = Column(String(255), nullable=False)
     
-    # Checkpoint Pointers (cross-database to agentgit.checkpoints.id)
-    entry_checkpoint_id = Column(Integer, nullable=True)
-    exit_checkpoint_id = Column(Integer, nullable=True)
+    # Checkpoint Pointers (v1.6: now String UUIDs)
+    entry_checkpoint_id = Column(String(128), nullable=True)
+    exit_checkpoint_id = Column(String(128), nullable=True)
     
     # Node Execution Status
     node_status = Column(String(20), nullable=False, default='started')
@@ -274,36 +275,17 @@ class NodeBoundaryORM(Base):
         Index('idx_wtb_node_boundaries_session', 'internal_session_id'),
         Index('idx_wtb_node_boundaries_execution', 'execution_id'),
         Index('idx_wtb_node_boundaries_status', 'node_status'),
+        # Updated 2026-01-15: Added 'pending' and 'running' status values for DDD compliance
         CheckConstraint(
-            "node_status IN ('started', 'completed', 'failed', 'skipped')",
+            "node_status IN ('pending', 'running', 'started', 'completed', 'failed', 'skipped')",
             name='ck_node_status'
         ),
     )
 
 
-class CheckpointFileORM(Base):
-    """ORM model for wtb_checkpoint_files table."""
-    
-    __tablename__ = 'wtb_checkpoint_files'
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    
-    # AgentGit Reference (cross-database, logical FK)
-    checkpoint_id = Column(Integer, nullable=False, unique=True)
-    
-    # FileTracker Reference (cross-database, logical FK)
-    file_commit_id = Column(String(64), nullable=False)
-    
-    # Summary (denormalized)
-    file_count = Column(Integer, default=0)
-    total_size_bytes = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    
-    __table_args__ = (
-        Index('idx_wtb_checkpoint_files_checkpoint', 'checkpoint_id'),
-        Index('idx_wtb_checkpoint_files_commit', 'file_commit_id'),
-    )
+# CheckpointFileORM DELETED (2026-01-27)
+# Use CheckpointFileLinkORM from file_processing_orm.py instead
+# Table: checkpoint_file_links
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

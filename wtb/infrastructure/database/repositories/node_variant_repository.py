@@ -42,13 +42,24 @@ class NodeVariantRepository(BaseRepository[NodeVariant, NodeVariantORM], INodeVa
         )
     
     def _to_orm(self, domain: NodeVariant) -> NodeVariantORM:
-        """Convert domain model to ORM."""
+        """
+        Convert domain model to ORM.
+        
+        ARCHITECTURE NOTE (2026-01-17):
+        - Callable implementations (lambdas, functions) cannot be serialized to JSON
+        - We only persist JSON-safe config values
+        - Implementations must be re-registered at startup (kept in memory)
+        - This is consistent with how LangGraph nodes work (in-memory callables)
+        """
+        # Filter out non-serializable values from config
+        safe_config = self._make_json_safe(domain.variant_node.config)
+        
         variant_def = {
             "id": domain.variant_node.id,
             "name": domain.variant_node.name,
             "type": domain.variant_node.type,
             "tool_name": domain.variant_node.tool_name,
-            "config": domain.variant_node.config,
+            "config": safe_config,
         }
         
         return NodeVariantORM(
@@ -60,8 +71,33 @@ class NodeVariantRepository(BaseRepository[NodeVariant, NodeVariantORM], INodeVa
             variant_definition=json.dumps(variant_def),
             is_active=domain.is_active,
             created_at=domain.created_at,
-            metadata_=json.dumps(domain.metadata),
+            metadata_=json.dumps(self._make_json_safe(domain.metadata)),
         )
+    
+    def _make_json_safe(self, obj):
+        """
+        Recursively filter out non-serializable values.
+        
+        Callables (functions, lambdas) are replaced with placeholder strings.
+        This allows the variant metadata to be persisted while noting that
+        the actual implementation must be re-registered at runtime.
+        """
+        if obj is None:
+            return None
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        if callable(obj):
+            return f"<callable:{getattr(obj, '__name__', 'anonymous')}>"
+        if isinstance(obj, dict):
+            return {k: self._make_json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._make_json_safe(item) for item in obj]
+        # For other types, try str() as last resort
+        try:
+            json.dumps(obj)
+            return obj
+        except (TypeError, ValueError):
+            return f"<non-serializable:{type(obj).__name__}>"
     
     def find_by_workflow(self, workflow_id: str) -> List[NodeVariant]:
         """Find all variants for a workflow."""

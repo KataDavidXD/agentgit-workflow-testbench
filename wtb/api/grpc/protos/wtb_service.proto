@@ -1,0 +1,318 @@
+// WTB gRPC Service Definition
+//
+// Provides high-performance API for:
+// - Execution control
+// - Event streaming
+// - Batch test management
+// - Interactive debugging
+
+syntax = "proto3";
+
+package wtb.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Main WTB Service
+// ═══════════════════════════════════════════════════════════════════════════════
+
+service WTBService {
+    // Execution Control
+    rpc StartExecution(StartExecutionRequest) returns (ExecutionResponse);
+    rpc PauseExecution(PauseExecutionRequest) returns (ControlResponse);
+    rpc ResumeExecution(ResumeExecutionRequest) returns (ControlResponse);
+    rpc StopExecution(StopExecutionRequest) returns (ControlResponse);
+    rpc RollbackExecution(RollbackRequest) returns (RollbackResponse);
+    
+    // Execution Streaming (for Ray workers)
+    rpc StreamExecutionEvents(ExecutionStreamRequest) returns (stream ExecutionEvent);
+    rpc StreamCheckpoints(CheckpointStreamRequest) returns (stream CheckpointEvent);
+    
+    // Batch Testing
+    rpc RunBatchTest(BatchTestRequest) returns (stream BatchTestProgress);
+    rpc GetBatchTestResults(BatchTestResultsRequest) returns (BatchTestResultsResponse);
+    
+    // Audit Event Streaming
+    rpc StreamAuditEvents(AuditStreamRequest) returns (stream AuditEvent);
+    
+    // Bidirectional Control Stream (for interactive debugging)
+    rpc InteractiveSession(stream InteractiveCommand) returns (stream InteractiveResponse);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Execution Messages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+message StartExecutionRequest {
+    string workflow_id = 1;
+    google.protobuf.Struct initial_state = 2;
+    repeated string breakpoints = 3;
+    ExecutionConfig config = 4;
+}
+
+message ExecutionConfig {
+    bool enable_file_tracking = 1;
+    bool enable_audit = 2;
+    int32 checkpoint_interval = 3;  // 0 = every node, N = every N nodes
+    map<string, string> metadata = 4;
+}
+
+message ExecutionResponse {
+    string execution_id = 1;
+    string status = 2;
+    string thread_id = 3;  // LangGraph thread_id
+    google.protobuf.Timestamp started_at = 4;
+}
+
+message PauseExecutionRequest {
+    string execution_id = 1;
+    string reason = 2;
+    string at_node = 3;  // Optional: pause at specific node
+}
+
+message ResumeExecutionRequest {
+    string execution_id = 1;
+    google.protobuf.Struct modified_state = 2;  // Optional state modifications
+    string from_node = 3;  // Optional: resume from specific node
+}
+
+message StopExecutionRequest {
+    string execution_id = 1;
+    string reason = 2;
+}
+
+message ControlResponse {
+    bool success = 1;
+    string status = 2;
+    string checkpoint_id = 3;
+    string message = 4;
+}
+
+message RollbackRequest {
+    string execution_id = 1;
+    string checkpoint_id = 2;
+    bool create_branch = 3;  // Create new session or modify in-place
+}
+
+message RollbackResponse {
+    bool success = 1;
+    string new_session_id = 2;  // If branch created
+    int32 tools_reversed = 3;
+    int32 files_restored = 4;
+    google.protobuf.Struct restored_state = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Streaming Messages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+message ExecutionStreamRequest {
+    string execution_id = 1;
+    repeated string event_types = 2;  // Filter: NODE_START, NODE_END, CHECKPOINT, etc.
+}
+
+message ExecutionEvent {
+    string event_id = 1;
+    string execution_id = 2;
+    EventType type = 3;
+    google.protobuf.Timestamp timestamp = 4;
+    oneof payload {
+        NodeStartEvent node_start = 5;
+        NodeEndEvent node_end = 6;
+        CheckpointEvent checkpoint = 7;
+        StateChangeEvent state_change = 8;
+        ErrorEvent error = 9;
+    }
+}
+
+enum EventType {
+    EVENT_TYPE_UNSPECIFIED = 0;
+    NODE_START = 1;
+    NODE_END = 2;
+    CHECKPOINT_CREATED = 3;
+    EXECUTION_PAUSED = 4;
+    EXECUTION_RESUMED = 5;
+    EXECUTION_COMPLETED = 6;
+    EXECUTION_FAILED = 7;
+    STATE_MODIFIED = 8;
+    ROLLBACK_PERFORMED = 9;
+}
+
+message NodeStartEvent {
+    string node_id = 1;
+    string node_name = 2;
+    string node_type = 3;
+    string entry_checkpoint_id = 4;
+}
+
+message NodeEndEvent {
+    string node_id = 1;
+    string node_name = 2;
+    bool success = 3;
+    int64 duration_ms = 4;
+    int32 tool_invocations = 5;
+    string exit_checkpoint_id = 6;
+    string error = 7;
+}
+
+message CheckpointEvent {
+    string checkpoint_id = 1;
+    string node_id = 2;
+    string trigger_type = 3;  // node_entry, node_exit, manual, auto
+    bool has_file_commit = 4;
+}
+
+message CheckpointStreamRequest {
+    string execution_id = 1;
+}
+
+message StateChangeEvent {
+    string source = 1;  // manual, tool, rollback
+    repeated string changed_keys = 2;
+}
+
+message ErrorEvent {
+    string error_type = 1;
+    string message = 2;
+    string node_id = 3;
+    bool recoverable = 4;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Batch Test Messages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+message BatchTestRequest {
+    string workflow_id = 1;
+    repeated VariantCombination variants = 2;
+    google.protobuf.Struct initial_state = 3;
+    int32 parallelism = 4;  // 0 = auto
+    bool use_ray = 5;
+}
+
+message VariantCombination {
+    string name = 1;
+    map<string, string> node_variants = 2;  // node_id -> variant_id
+}
+
+message BatchTestProgress {
+    string batch_test_id = 1;
+    int32 total_variants = 2;
+    int32 completed = 3;
+    int32 failed = 4;
+    VariantProgress current_variant = 5;
+    float estimated_remaining_seconds = 6;
+}
+
+message VariantProgress {
+    string variant_name = 1;
+    string status = 2;  // running, completed, failed
+    string current_node = 3;
+    float progress_percent = 4;
+}
+
+message BatchTestResultsRequest {
+    string batch_test_id = 1;
+}
+
+message BatchTestResultsResponse {
+    string batch_test_id = 1;
+    string status = 2;
+    ComparisonMatrix matrix = 3;
+    google.protobuf.Timestamp completed_at = 4;
+}
+
+message ComparisonMatrix {
+    repeated string metric_names = 1;
+    repeated VariantResult variants = 2;
+    string best_variant = 3;
+}
+
+message VariantResult {
+    string variant_name = 1;
+    map<string, double> metrics = 2;
+    double overall_score = 3;
+    string status = 4;
+    string error = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Audit Stream Messages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+message AuditStreamRequest {
+    string execution_id = 1;  // Optional: filter by execution
+    repeated string event_types = 2;
+    google.protobuf.Timestamp since = 3;
+    bool include_debug = 4;
+}
+
+message AuditEvent {
+    string event_id = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    string event_type = 3;
+    string severity = 4;  // info, success, warning, error, debug
+    string message = 5;
+    string execution_id = 6;
+    string node_id = 7;
+    google.protobuf.Struct details = 8;
+    string error = 9;
+    int64 duration_ms = 10;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Interactive Session (Bidirectional)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+message InteractiveCommand {
+    string execution_id = 1;
+    oneof command {
+        InspectStateCommand inspect_state = 2;
+        ModifyStateCommand modify_state = 3;
+        SetBreakpointCommand set_breakpoint = 4;
+        StepCommand step = 5;
+        ContinueCommand continue_exec = 6;
+    }
+}
+
+message InspectStateCommand {
+    repeated string keys = 1;  // Empty = all keys
+}
+
+message ModifyStateCommand {
+    google.protobuf.Struct changes = 1;
+}
+
+message SetBreakpointCommand {
+    string node_id = 1;
+    bool enabled = 2;
+}
+
+message StepCommand {
+    int32 steps = 1;  // Number of nodes to execute
+}
+
+message ContinueCommand {
+    string until_node = 1;  // Optional: run until this node
+}
+
+message InteractiveResponse {
+    bool success = 1;
+    string message = 2;
+    oneof payload {
+        StateInspectionResult state = 3;
+        ExecutionStatusResult status = 4;
+    }
+}
+
+message StateInspectionResult {
+    google.protobuf.Struct state = 1;
+    string current_node = 2;
+}
+
+message ExecutionStatusResult {
+    string status = 1;
+    string current_node = 2;
+    string last_checkpoint_id = 3;
+}

@@ -36,6 +36,11 @@ from wtb.domain.events import (
     ExecutionPausedEvent, ExecutionResumedEvent, ExecutionCancelledEvent,
     NodeStartedEvent, NodeCompletedEvent, NodeFailedEvent, NodeSkippedEvent,
     CheckpointCreatedEvent, RollbackPerformedEvent, BranchCreatedEvent,
+    # Ray events
+    RayBatchTestStartedEvent, RayBatchTestCompletedEvent, RayBatchTestFailedEvent,
+    RayBatchTestCancelledEvent, RayActorPoolCreatedEvent, RayActorInitializedEvent,
+    RayActorFailedEvent, RayVariantExecutionStartedEvent, RayVariantExecutionCompletedEvent,
+    RayVariantExecutionFailedEvent, RayVariantFilesTrackedEvent, RayBackpressureAppliedEvent,
 )
 
 
@@ -67,6 +72,20 @@ class WTBAuditEventType(Enum):
     # Variant testing
     VARIANT_STARTED = "variant_started"
     VARIANT_COMPLETED = "variant_completed"
+    
+    # Ray batch test events (2026-01-15)
+    RAY_BATCH_TEST_STARTED = "ray_batch_test_started"
+    RAY_BATCH_TEST_COMPLETED = "ray_batch_test_completed"
+    RAY_BATCH_TEST_FAILED = "ray_batch_test_failed"
+    RAY_BATCH_TEST_CANCELLED = "ray_batch_test_cancelled"
+    RAY_ACTOR_POOL_CREATED = "ray_actor_pool_created"
+    RAY_ACTOR_INITIALIZED = "ray_actor_initialized"
+    RAY_ACTOR_FAILED = "ray_actor_failed"
+    RAY_VARIANT_EXECUTION_STARTED = "ray_variant_execution_started"
+    RAY_VARIANT_EXECUTION_COMPLETED = "ray_variant_execution_completed"
+    RAY_VARIANT_EXECUTION_FAILED = "ray_variant_execution_failed"
+    RAY_FILES_TRACKED = "ray_files_tracked"
+    RAY_BACKPRESSURE = "ray_backpressure"
 
 
 class WTBAuditSeverity(Enum):
@@ -318,44 +337,246 @@ class WTBAuditTrail:
                 node_id=event.node_id,
             )
         
-        # Checkpoint events
+        # Checkpoint events (Updated 2026-01-15 for DDD compliance)
         if isinstance(event, CheckpointCreatedEvent):
+            # Handle both old and new event format
+            checkpoint_id = getattr(event, 'checkpoint_id', None)
+            completed_node = getattr(event, 'completed_node', None)
+            step = getattr(event, 'step', 0)
+            is_terminal = getattr(event, 'is_terminal', False)
+            
             return WTBAuditEntry(
                 timestamp=event.timestamp,
                 event_type=WTBAuditEventType.CHECKPOINT_CREATED,
                 severity=WTBAuditSeverity.INFO,
-                message=f"Checkpoint #{event.checkpoint_id} created ({event.trigger_type or 'auto'})",
+                message=f"Checkpoint '{checkpoint_id}' created (step {step})",
                 execution_id=event.execution_id,
-                node_id=event.node_id,
+                node_id=completed_node,
                 details={
-                    "checkpoint_name": event.checkpoint_name,
-                    "is_auto": event.is_auto,
-                    "has_file_commit": event.has_file_commit,
+                    "step": step,
+                    "completed_node": completed_node,
+                    "is_terminal": is_terminal,
                 },
             )
         
         if isinstance(event, RollbackPerformedEvent):
+            # Handle both old and new event format
+            to_checkpoint_id = getattr(event, 'to_checkpoint_id', None)
+            from_checkpoint_id = getattr(event, 'from_checkpoint_id', None)
+            rolled_back_nodes = getattr(event, 'rolled_back_nodes', [])
+            
             return WTBAuditEntry(
                 timestamp=event.timestamp,
                 event_type=WTBAuditEventType.ROLLBACK_PERFORMED,
                 severity=WTBAuditSeverity.WARNING,
-                message=f"Rolled back to checkpoint #{event.to_checkpoint_id} ({event.tools_reversed} tools reversed)",
+                message=f"Rolled back to checkpoint '{to_checkpoint_id}' ({len(rolled_back_nodes)} nodes reverted)",
                 execution_id=event.execution_id,
                 details={
-                    "from_checkpoint": event.from_checkpoint_id,
-                    "new_session_id": event.new_session_id,
-                    "files_restored": event.files_restored,
+                    "from_checkpoint": from_checkpoint_id,
+                    "to_checkpoint": to_checkpoint_id,
+                    "rolled_back_nodes": rolled_back_nodes,
                 },
             )
         
         if isinstance(event, BranchCreatedEvent):
+            new_thread_id = getattr(event, 'new_thread_id', None)
+            parent_exec = getattr(event, 'parent_execution_id', None)
+            
             return WTBAuditEntry(
                 timestamp=event.timestamp,
                 event_type=WTBAuditEventType.BRANCH_CREATED,
                 severity=WTBAuditSeverity.INFO,
-                message=f"Branch created: session {event.new_session_id} from {event.parent_session_id}",
+                message=f"Branch created: thread {new_thread_id} from {parent_exec}",
                 execution_id=event.execution_id,
                 details={"reason": event.branch_reason},
+            )
+        
+        # ═══════════════════════════════════════════════════════════════
+        # Ray Batch Test Events
+        # ═══════════════════════════════════════════════════════════════
+        
+        if isinstance(event, RayBatchTestStartedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_BATCH_TEST_STARTED,
+                severity=WTBAuditSeverity.INFO,
+                message=f"Ray batch test '{event.batch_test_id}' started ({event.variant_count} variants, {event.parallel_workers} workers)",
+                execution_id=event.batch_test_id,
+                details={
+                    "workflow_id": event.workflow_id,
+                    "workflow_name": event.workflow_name,
+                    "file_tracking_enabled": event.file_tracking_enabled,
+                    "max_pending_tasks": event.max_pending_tasks,
+                },
+            )
+        
+        if isinstance(event, RayBatchTestCompletedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_BATCH_TEST_COMPLETED,
+                severity=WTBAuditSeverity.SUCCESS,
+                message=f"Ray batch test completed: {event.variants_succeeded} succeeded, {event.variants_failed} failed",
+                execution_id=event.batch_test_id,
+                duration_ms=float(event.duration_ms),
+                details={
+                    "best_combination": event.best_combination_name,
+                    "best_score": event.best_overall_score,
+                    "files_tracked": event.total_files_tracked,
+                    "has_comparison_matrix": event.has_comparison_matrix,
+                },
+            )
+        
+        if isinstance(event, RayBatchTestFailedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_BATCH_TEST_FAILED,
+                severity=WTBAuditSeverity.ERROR,
+                message=f"Ray batch test failed: {event.error_message}",
+                execution_id=event.batch_test_id,
+                duration_ms=float(event.duration_ms),
+                error=f"{event.error_type}: {event.error_message}",
+                details={
+                    "failed_at_variant": event.failed_at_variant,
+                    "variants_succeeded": event.variants_succeeded,
+                    "variants_failed": event.variants_failed,
+                    "variants_pending": event.variants_pending,
+                },
+            )
+        
+        if isinstance(event, RayBatchTestCancelledEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_BATCH_TEST_CANCELLED,
+                severity=WTBAuditSeverity.WARNING,
+                message=f"Ray batch test cancelled: {event.reason}",
+                execution_id=event.batch_test_id,
+                duration_ms=float(event.duration_ms),
+                details={
+                    "cancelled_by": event.cancelled_by,
+                    "variants_completed": event.variants_completed,
+                    "variants_cancelled": event.variants_cancelled,
+                },
+            )
+        
+        if isinstance(event, RayActorPoolCreatedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_ACTOR_POOL_CREATED,
+                severity=WTBAuditSeverity.INFO,
+                message=f"Ray actor pool created: {event.num_actors} actors",
+                execution_id=event.batch_test_id,
+                details={
+                    "cpus_per_actor": event.cpus_per_actor,
+                    "memory_per_actor_gb": event.memory_per_actor_gb,
+                    "actor_ids": event.actor_ids,
+                },
+            )
+        
+        if isinstance(event, RayActorInitializedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_ACTOR_INITIALIZED,
+                severity=WTBAuditSeverity.DEBUG,
+                message=f"Ray actor '{event.actor_id}' initialized",
+                execution_id=event.batch_test_id,
+                duration_ms=float(event.initialization_time_ms),
+                details={
+                    "state_adapter_type": event.state_adapter_type,
+                    "file_tracking_enabled": event.file_tracking_enabled,
+                },
+            )
+        
+        if isinstance(event, RayActorFailedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_ACTOR_FAILED,
+                severity=WTBAuditSeverity.ERROR,
+                message=f"Ray actor '{event.actor_id}' failed: {event.error_message}",
+                execution_id=event.batch_test_id,
+                error=f"{event.error_type}: {event.error_message}",
+                details={
+                    "executing_variant": event.executing_variant,
+                    "executions_completed": event.executions_completed,
+                },
+            )
+        
+        if isinstance(event, RayVariantExecutionStartedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_VARIANT_EXECUTION_STARTED,
+                severity=WTBAuditSeverity.DEBUG,
+                message=f"Variant '{event.combination_name}' started on actor '{event.actor_id}'",
+                execution_id=event.batch_test_id,
+                node_id=event.execution_id,
+                details={
+                    "variants": event.variants,
+                    "queue_position": event.queue_position,
+                    "total_in_queue": event.total_in_queue,
+                },
+            )
+        
+        if isinstance(event, RayVariantExecutionCompletedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_VARIANT_EXECUTION_COMPLETED,
+                severity=WTBAuditSeverity.SUCCESS,
+                message=f"Variant '{event.combination_name}' completed (score: {event.overall_score:.2f})",
+                execution_id=event.batch_test_id,
+                node_id=event.execution_id,
+                duration_ms=float(event.duration_ms),
+                details={
+                    "checkpoint_count": event.checkpoint_count,
+                    "node_count": event.node_count,
+                    "metrics": event.metrics,
+                    "files_tracked": event.files_tracked,
+                    "file_commit_id": event.file_commit_id,
+                },
+            )
+        
+        if isinstance(event, RayVariantExecutionFailedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_VARIANT_EXECUTION_FAILED,
+                severity=WTBAuditSeverity.ERROR,
+                message=f"Variant '{event.combination_name}' failed: {event.error_message}",
+                execution_id=event.batch_test_id,
+                node_id=event.execution_id,
+                duration_ms=float(event.duration_ms),
+                error=f"{event.error_type}: {event.error_message}",
+                details={
+                    "failed_at_node": event.failed_at_node,
+                    "nodes_completed": event.nodes_completed,
+                    "checkpoints_created": event.checkpoints_created,
+                },
+            )
+        
+        if isinstance(event, RayVariantFilesTrackedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_FILES_TRACKED,
+                severity=WTBAuditSeverity.INFO,
+                message=f"Tracked {event.files_tracked} files for variant '{event.combination_name}'",
+                execution_id=event.batch_test_id,
+                node_id=event.execution_id,
+                details={
+                    "file_commit_id": event.file_commit_id,
+                    "checkpoint_id": event.checkpoint_id,
+                    "file_paths": event.file_paths[:5],  # Limit for readability
+                },
+            )
+        
+        if isinstance(event, RayBackpressureAppliedEvent):
+            return WTBAuditEntry(
+                timestamp=event.timestamp,
+                event_type=WTBAuditEventType.RAY_BACKPRESSURE,
+                severity=WTBAuditSeverity.WARNING,
+                message=f"Backpressure applied: {event.pending_tasks}/{event.max_pending_tasks} pending tasks",
+                execution_id=event.batch_test_id,
+                duration_ms=float(event.wait_time_ms),
+                details={
+                    "pending_tasks": event.pending_tasks,
+                    "max_pending_tasks": event.max_pending_tasks,
+                },
             )
         
         return None
@@ -578,6 +799,19 @@ class AuditEventListener:
             CheckpointCreatedEvent,
             RollbackPerformedEvent,
             BranchCreatedEvent,
+            # Ray events
+            RayBatchTestStartedEvent,
+            RayBatchTestCompletedEvent,
+            RayBatchTestFailedEvent,
+            RayBatchTestCancelledEvent,
+            RayActorPoolCreatedEvent,
+            RayActorInitializedEvent,
+            RayActorFailedEvent,
+            RayVariantExecutionStartedEvent,
+            RayVariantExecutionCompletedEvent,
+            RayVariantExecutionFailedEvent,
+            RayVariantFilesTrackedEvent,
+            RayBackpressureAppliedEvent,
         ]
     
     def attach(self, event_bus: "WTBEventBus") -> None:  # type: ignore

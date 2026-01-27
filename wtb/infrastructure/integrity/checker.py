@@ -165,14 +165,14 @@ class IntegrityChecker:
                         ))
     
     def _check_checkpoint_file_references(self, report: IntegrityReport) -> None:
-        """Check checkpoint_files references to AgentGit checkpoints."""
+        """Check checkpoint_file_links references to AgentGit checkpoints."""
         if not self._checkpoint_repo:
             logger.debug("Skipping checkpoint file check - no checkpoint repo")
             return
         
         with SQLAlchemyUnitOfWork(self._wtb_db_url) as uow:
             # Get all checkpoint file links
-            links = uow.checkpoint_files.list(limit=10000)
+            links = uow.checkpoint_file_links.list_all(limit=10000)
             report.total_checked += len(links)
             
             for link in links:
@@ -180,7 +180,7 @@ class IntegrityChecker:
                 cp = self._checkpoint_repo.get_by_id(link.checkpoint_id)
                 if not cp:
                     report.add_issue(IntegrityIssue.dangling_reference(
-                        source_table="wtb_checkpoint_files",
+                        source_table="wtb_checkpoint_file_links",
                         source_id=str(link.id),
                         target_table="agentgit.checkpoints",
                         target_id=str(link.checkpoint_id),
@@ -208,8 +208,8 @@ class IntegrityChecker:
                 if boundary.exit_checkpoint_id:
                     referenced_ids.add(boundary.exit_checkpoint_id)
             
-            # From checkpoint_files
-            links = uow.checkpoint_files.list(limit=10000)
+            # From checkpoint_file_links
+            links = uow.checkpoint_file_links.list_all(limit=10000)
             for link in links:
                 referenced_ids.add(link.checkpoint_id)
         
@@ -288,8 +288,8 @@ class IntegrityChecker:
         with SQLAlchemyUnitOfWork(self._wtb_db_url) as uow:
             if issue.source_table == "wtb_node_boundaries":
                 uow.node_boundaries.delete(issue.source_id)
-            elif issue.source_table == "wtb_checkpoint_files":
-                uow.checkpoint_files.delete(issue.source_id)
+            elif issue.source_table == "wtb_checkpoint_file_links":
+                uow.checkpoint_file_links.delete_by_checkpoint(int(issue.source_id))
             uow.commit()
         
         logger.info(f"Deleted orphan: {issue.source_table}/{issue.source_id}")

@@ -6,7 +6,15 @@ from .node_variant_repository import NodeVariantRepository
 from .batch_test_repository import BatchTestRepository
 from .evaluation_result_repository import EvaluationResultRepository
 from .node_boundary_repository import NodeBoundaryRepository
-from .checkpoint_file_repository import CheckpointFileRepository
+# CheckpointFileRepository REMOVED (2026-01-27) - Use SQLAlchemyCheckpointFileLinkRepository
+from .file_processing_repository import (
+    SQLAlchemyBlobRepository,
+    SQLAlchemyFileCommitRepository,
+    SQLAlchemyCheckpointFileLinkRepository,
+    InMemoryBlobRepository,
+    InMemoryFileCommitRepository,
+    InMemoryCheckpointFileLinkRepository,
+)
 
 __all__ = [
     "WorkflowRepository",
@@ -15,6 +23,12 @@ __all__ = [
     "BatchTestRepository",
     "EvaluationResultRepository",
     "NodeBoundaryRepository",
-    "CheckpointFileRepository",
+    # File Processing (2026-01-15, consolidated 2026-01-27)
+    "SQLAlchemyBlobRepository",
+    "SQLAlchemyFileCommitRepository",
+    "SQLAlchemyCheckpointFileLinkRepository",
+    "InMemoryBlobRepository",
+    "InMemoryFileCommitRepository",
+    "InMemoryCheckpointFileLinkRepository",
 ]
 

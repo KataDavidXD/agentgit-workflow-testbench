@@ -1,560 +1,512 @@
-# WTB Project Progress Tracker
+# WTB Implementation Progress Tracker
 
-**Last Updated:** 2025-01-09 (Night) UTC+8
-
-## Project Structure
-
-```
-wtb/
-├── domain/
-│   ├── models/          [DONE] workflow, execution, node_boundary, checkpoint_file, batch_test, evaluation
-│   │                    [DONE] outbox (OutboxEvent), integrity (IntegrityIssue, IntegrityReport)
-│   │                    [DONE] Rich Domain Model for Execution entity
-│   ├── interfaces/      [DONE] repositories, unit_of_work, state_adapter, execution_controller, node_replacer
-│   │                    [DONE] IOutboxRepository, IAuditLogRepository
-│   │                    [DONE] IEnvironmentProvider, IBatchTestRunner ← NEW (2025-01-09)
-│   ├── events/          [DONE] execution_events, node_events, checkpoint_events
-│   └── audit/           [DONE] WTBAuditTrail, WTBAuditEntry (moved to infrastructure/events)
-├── application/
-│   ├── services/        [DONE] execution_controller, node_replacer
-│   │                    [DONE] ThreadPoolBatchTestRunner, RayBatchTestRunner (stub) ← NEW (2025-01-09)
-│   │                    [DESIGN] ParallelContextFactory
-│   └── factories.py     [DONE] ExecutionControllerFactory, NodeReplacerFactory, BatchTestRunnerFactory ← NEW
-├── infrastructure/
-│   ├── database/        [DONE] config, setup, models (ORM), repositories, unit_of_work, inmemory_unit_of_work, factory
-│   │                    [DONE] OutboxORM model, SQLAlchemyOutboxRepository, InMemoryOutboxRepository
-│   │                    [DONE] AuditLogORM, SQLAlchemyAuditLogRepository, InMemoryAuditLogRepository
-│   │                    [DONE] migrations/ with 002_batch_tests.sql, 003_postgresql_production.sql ← NEW
-│   ├── adapters/        [DONE] InMemoryStateAdapter, AgentGitStateAdapter
-│   │                    [TODO] session_manager (lifecycle cleanup)
-│   ├── environment/     [DONE] InProcessEnvironmentProvider, RayEnvironmentProvider ← NEW (2025-01-09)
-│   ├── outbox/          [DONE] OutboxProcessor (background worker)
-│   ├── integrity/       [DONE] IntegrityChecker (cross-DB consistency)
-│   └── events/          [DONE] WTBEventBus, WTBAuditTrail, AuditEventListener ← NEW (2025-01-09)
-├── config.py            [DONE] WTBConfig with storage modes
-│                        [DONE] RayConfig for batch testing ← NEW (2025-01-09)
-├── tests/
-│   └── test_wtb/        [DONE] 275 tests passing (+67 new tests)
-│                        [DONE] test_outbox.py, test_integrity.py, test_cross_db_consistency.py
-│                        [DONE] test_event_bus.py, test_audit_trail.py, test_batch_runner.py, test_audit_repository.py ← NEW
-│                        [TODO] test_parallel_sessions.py
-└── examples/
-    └── ml_pipeline_workflow.py  [DONE] 10-step ML pipeline with LangChain LLM + rollback
-```
-
-## Completed ✓
-
-| Component                            | Status          | Notes                                                                    |
-| ------------------------------------ | --------------- | ------------------------------------------------------------------------ |
-| Domain Models                        | ✓              | Workflow, Execution, NodeBoundary, CheckpointFile, BatchTest, Evaluation |
-| Domain Interfaces                    | ✓              | IRepository, IStateAdapter, IExecutionController, INodeReplacer          |
-| Domain Events                        | ✓              | Execution, Node, Checkpoint events                                       |
-| SQLAlchemy ORM                       | ✓              | All 7 WTB tables defined + OutboxORM + AuditLogORM                       |
-| Repositories                         | ✓              | All repository implementations                                           |
-| SQLAlchemyUnitOfWork                 | ✓              | Production UoW with SQLAlchemy                                           |
-| **InMemoryUnitOfWork**         | ✓**NEW** | For testing - no I/O, fast, isolated                                     |
-| **UnitOfWorkFactory**          | ✓**NEW** | Factory pattern for UoW creation                                         |
-| Database Config                      | ✓              | Local data/ folder, redirect AgentGit                                    |
-| InMemoryStateAdapter                 | ✓              | For testing/development                                                  |
-| **AgentGitStateAdapter**       | ✓**NEW** | Production adapter with AgentGit checkpoints                             |
-| ExecutionController                  | ✓              | run, pause, resume, stop, rollback                                       |
-| NodeReplacer                         | ✓              | variant registry, hot-swap                                               |
-| **ExecutionControllerFactory** | ✓**NEW** | DI factory for controller creation                                       |
-| **NodeReplacerFactory**        | ✓**NEW** | DI factory for replacer creation                                         |
-| **WTBConfig**                  | ✓**NEW** | Centralized config with storage modes                                    |
-| **Outbox Pattern**             | ✓**NEW** | Cross-DB consistency (P0 fix)                                            |
-| **IntegrityChecker**           | ✓**NEW** | Data integrity validation (P0 fix)                                       |
-| **Rich Domain Model**          | ✓**NEW** | Enhanced Execution entity (P1 fix)                                       |
-| **WTBEventBus**                | ✓**NEW** | Thread-safe event bus with bounded history (2025-01-09)                 |
-| **WTBAuditTrail**              | ✓**NEW** | Execution/Node-level audit tracking (2025-01-09)                        |
-| **IAuditLogRepository**        | ✓**NEW** | Persistence for audit logs (2025-01-09)                                 |
-| **IBatchTestRunner**           | ✓**NEW** | Interface for batch test execution (2025-01-09)                         |
-| **ThreadPoolBatchTestRunner**  | ✓**NEW** | Local multithreaded batch runner (2025-01-09)                           |
-| **RayBatchTestRunner**         | ✓**STUB** | Ray-based distributed batch runner (2025-01-09)                         |
-| **VariantExecutionActor**      | ✓**STUB** | Ray Actor for variant execution (2025-01-09)                            |
-| **BatchTestRunnerFactory**     | ✓**NEW** | Factory for ThreadPool/Ray selection (2025-01-09)                       |
-| **RayConfig**                  | ✓**NEW** | Ray cluster configuration (2025-01-09)                                  |
-| **IEnvironmentProvider**       | ✓**NEW** | Environment isolation interface (2025-01-09)                            |
-| **RayEnvironmentProvider**     | ✓**NEW** | Ray runtime_env provider (2025-01-09)                                   |
-| **Database Migrations**        | ✓**NEW** | Batch test tables + PostgreSQL indexes (2025-01-09)                     |
-| Unit Tests                           | ✓              | 275 tests passing (+67 new tests on 2025-01-09)                         |
-| ML Pipeline Example                  | ✓              | LangChain + real rollback demo                                           |
-
-## New Implementation (2025-01-09)
-
-### Files Created (TODAY):
-
-**Event Bus & Audit:**
-- `wtb/infrastructure/events/__init__.py` - Event module exports
-- `wtb/infrastructure/events/wtb_event_bus.py` - Thread-safe WTBEventBus with bounded history
-- `wtb/infrastructure/events/wtb_audit_trail.py` - WTBAuditTrail, WTBAuditEntry, AuditEventListener
-- `wtb/infrastructure/database/repositories/audit_repository.py` - AuditLogRepository
-
-**Batch Test Infrastructure:**
-- `wtb/domain/interfaces/batch_runner.py` - IBatchTestRunner, IEnvironmentProvider interfaces
-- `wtb/application/services/batch_test_runner.py` - ThreadPoolBatchTestRunner implementation
-- `wtb/application/services/ray_batch_runner.py` - RayBatchTestRunner (stub), VariantExecutionActor
-
-**Environment Providers:**
-- `wtb/infrastructure/environment/__init__.py` - Environment module exports
-- `wtb/infrastructure/environment/providers.py` - InProcess/Ray/Grpc environment providers
-
-**Database Migrations:**
-- `wtb/infrastructure/database/migrations/002_batch_tests.sql` - SQLite batch test tables
-- `wtb/infrastructure/database/migrations/003_postgresql_production.sql` - PostgreSQL indexes + JSONB
-
-**Tests:**
-- `tests/test_wtb/test_event_bus.py` - 20 tests for WTBEventBus
-- `tests/test_wtb/test_audit_trail.py` - 24 tests for WTBAuditTrail
-- `tests/test_wtb/test_audit_repository.py` - 3 tests for AuditRepository
-- `tests/test_wtb/test_batch_runner.py` - 20 tests for batch runners
-
-**Modified:**
-- `wtb/config.py` - Added RayConfig dataclass and ray_enabled/ray_config fields
-- `wtb/application/factories.py` - Added BatchTestRunnerFactory
-- `wtb/domain/interfaces/__init__.py` - Export batch runner interfaces
-- `wtb/infrastructure/__init__.py` - Export event bus and environment providers
-- `wtb/domain/interfaces/repositories.py` - Added IAuditLogRepository
-- `wtb/domain/interfaces/unit_of_work.py` - Added audit_logs
-- `wtb/infrastructure/database/models.py` - Added AuditLogORM
-- `wtb/infrastructure/database/unit_of_work.py` - Added audit_logs initialization
-- `wtb/infrastructure/database/inmemory_unit_of_work.py` - Added InMemoryAuditLogRepository
-
-### Design Patterns Implemented (2025-01-09):
-
-- **Thread-Safe Event Bus**: RLock + bounded deque for concurrent access
-- **Publish-Subscribe**: Event-driven audit tracking via AuditEventListener
-- **Factory Pattern**: BatchTestRunnerFactory for ThreadPool/Ray selection
-- **Interface Abstraction**: IBatchTestRunner, IEnvironmentProvider for swappable implementations
-- **Actor Pattern (Ray)**: VariantExecutionActor for connection reuse
+**Last Updated:** 2026-01-27  
+**Overall Status:** ✅ Phase 1 Complete (v1.7 Released)
 
 ---
 
-## Previous Implementation (2024-12-23)
-
-### Files Created:
-
-- `wtb/config.py` - WTBConfig with for_testing(), for_development(), for_production() presets
-- `wtb/infrastructure/database/inmemory_unit_of_work.py` - Full in-memory repository implementations
-- `wtb/infrastructure/database/factory.py` - UnitOfWorkFactory for mode-based UoW creation
-- `wtb/infrastructure/adapters/agentgit_state_adapter.py` - Production AgentGit integration
-- `wtb/application/factories.py` - ExecutionControllerFactory, NodeReplacerFactory
-- `tests/test_wtb/test_factories.py` - 24 new tests for factories and config
-
-### Design Patterns Implemented:
-
-- **Dual Database Pattern**: AgentGit (checkpoints) + WTB (domain data)
-- **Factory Pattern**: UoW and service factories for dependency injection
-- **Repository Pattern**: In-memory implementations for all 7 repositories
-- **Anti-Corruption Layer**: AgentGitStateAdapter bridges WTB ↔ AgentGit
-
-## Architecture Fix (P0-P1) - 2024-12-23 - IMPLEMENTED ✓
-
-### Architecture Review Results
-
-| Priority     | Issue                            | Solution          | Status  |
-| ------------ | -------------------------------- | ----------------- | ------- |
-| **P0** | Cross-DB Transaction Consistency | Outbox Pattern    | ✅ DONE |
-| **P0** | Data Integrity (Logical FKs)     | IntegrityChecker  | ✅ DONE |
-| **P1** | Anemic Domain Model              | Rich Domain Model | ✅ DONE |
-| P2           | Error Standardization            | Error Hierarchy   | TODO    |
-
-### Files Created/Modified:
-
-**Domain Models:**
-
-- `wtb/domain/models/outbox.py` - OutboxEvent, OutboxEventType, OutboxStatus
-- `wtb/domain/models/integrity.py` - IntegrityIssue, IntegrityReport, RepairAction
-- `wtb/domain/models/workflow.py` - Enhanced Execution with rich business logic
-
-**Interfaces:**
-
-- `wtb/domain/interfaces/outbox_repository.py` - IOutboxRepository interface
-- `wtb/domain/interfaces/unit_of_work.py` - Added outbox property to IUnitOfWork
-
-**Infrastructure:**
-
-- `wtb/infrastructure/database/models.py` - Added OutboxEventORM
-- `wtb/infrastructure/database/repositories/outbox_repository.py` - SQLAlchemyOutboxRepository
-- `wtb/infrastructure/database/inmemory_unit_of_work.py` - Added InMemoryOutboxRepository
-- `wtb/infrastructure/outbox/processor.py` - OutboxProcessor background worker
-- `wtb/infrastructure/integrity/checker.py` - IntegrityChecker implementation
-
-**Tests (57 new tests):**
-
-- `tests/test_wtb/test_outbox.py` - 26 tests for Outbox Pattern
-- `tests/test_wtb/test_integrity.py` - 20 tests for IntegrityChecker
-- `tests/test_wtb/test_cross_db_consistency.py` - 11 integration tests
-
-### Outbox Pattern Overview:
+## Progress Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    WTB DB (Transaction Center)               │
-│  ┌───────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │ wtb_executions│  │node_boundaries│  │   wtb_outbox    │  │
-│  └───────────────┘  └───────────────┘  └────────┬────────┘  │
-│                                                  │           │
-│                            Atomic Write ─────────┘           │
-└─────────────────────────────────────────────────────────────┘
-                               │
-                     OutboxProcessor (Background)
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-       AgentGit DB      FileTracker DB    FileTracker FS
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        IMPLEMENTATION PROGRESS                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  Core Architecture         ████████████████████████████████████████  100%       │
+│  Domain Layer              ████████████████████████████████████████  100%       │
+│  Application Services      ████████████████████████████████████████  100%       │
+│  Infrastructure            ████████████████████████████████████████  100%       │
+│  API Layer                 ████████████████████████████████████░░░░   90%       │
+│  SDK                       ████████████████████████████████████████  100%       │
+│  Tests                     ████████████████████████████████████░░░░   95%       │
+│  Documentation             ████████████████████████████████████████  100%       │
+│                                                                                  │
+│  Phase 0 (Domain Cleanup)  ████████████████████████████████████████  100%       │
+│  Phase 1 (Batch Unify)     ████████████████████████████████████████  100%       │
+│  Phase 2 (Final Cleanup)   ████████████████░░░░░░░░░░░░░░░░░░░░░░░░   35%       │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Rich Domain Model Enhancements:
-
-| Method                                  | Purpose                                  |
-| --------------------------------------- | ---------------------------------------- |
-| `Execution.start()`                   | State transition with validation         |
-| `Execution.pause()`                   | Pause with reason tracking               |
-| `Execution.resume()`                  | Resume with state modification support   |
-| `Execution.complete()`                | Mark complete with final state           |
-| `Execution.fail()`                    | Record failure with error details        |
-| `Execution.record_node_result()`      | Track node execution results             |
-| `Execution.advance_to_node()`         | Move to next node                        |
-| `Execution.restore_from_checkpoint()` | Rollback support                         |
-| `InvalidStateTransition`              | Domain exception for invalid transitions |
-
-### Documentation Created:
-
-- `docs/Adapter_and_WTB-Storage/ARCHITECTURE_FIX_DESIGN.md` - Full design document
-
-## Event Bus & Audit Trail Design - 2024-12-23 - DESIGN COMPLETE
-
-### AgentGit Analysis:
-
-- **EventBus**: Publish-subscribe pattern, DomainEvent base, global singleton
-- **AuditTrail**: LangChain callback integration, checkpoint metadata storage
-
-### WTB Integration Design:
-
-| Component          | Status      | Description                                |
-| ------------------ | ----------- | ------------------------------------------ |
-| WTBEventBus        | ✓ DESIGNED | Wraps AgentGit EventBus + thread-safety    |
-| WTBAuditTrail      | ✓ DESIGNED | Node/Execution-level audit (vs tool-level) |
-| AuditEventListener | ✓ DESIGNED | Auto-records WTB events to audit           |
-| AgentGit Bridge    | ✓ DESIGNED | Bridge AgentGit events to WTB              |
-
-### Documentation Created:
-
-- `docs/EventBus_and_Audit_Session/WTB_EVENTBUS_AUDIT_DESIGN.md` - Full design document
-- `docs/EventBus_and_Audit_Session/INDEX.md` - Navigation index
-
-## Ray Batch Test Runner Design (2025-01) - DESIGN COMPLETE ✓
-
-### Design Decision: Ray over ThreadPoolExecutor
-
-| Criteria | ThreadPoolExecutor | Ray | Decision |
-|----------|-------------------|-----|----------|
-| **Parallelism** | GIL-bound | True distributed | Ray ✓ |
-| **Resource Mgmt** | Manual | Declarative (`num_cpus`, `memory`) | Ray ✓ |
-| **Failure Handling** | Basic exceptions | Built-in retry, fault tolerance | Ray ✓ |
-| **Scaling** | Single-node | Multi-node cluster | Ray ✓ |
-| **Development** | Simple | Local mode available | Tie |
-
-### Key Components Designed
-
-| Component | Status | Description |
-|-----------|--------|-------------|
-| `RayBatchTestRunner` | ✅ DESIGNED | Orchestrates parallel batch tests with ActorPool |
-| `VariantExecutionActor` | ✅ DESIGNED | Ray Actor for executing single variant |
-| `IBatchTestRunner` | ✅ DESIGNED | Interface for ThreadPool/Ray abstraction |
-| `BatchTestRunnerFactory` | ✅ DESIGNED | Factory for runner selection |
-| `RayConfig` | ✅ DESIGNED | Cluster configuration dataclass |
-| `IEnvironmentProvider` | ✅ DESIGNED | Environment isolation interface |
-| `RayEnvironmentProvider` | ✅ DESIGNED | Ray runtime_env implementation |
-
-### Environment Management Decision
-
-**Decision**: Adapt existing environment service via interface abstraction.
-- Default: `RayEnvironmentProvider` (Ray runtime_env)
-- Optional: `GrpcEnvironmentProvider` (wraps existing service)
-- Rationale: Ray runtime_env is sufficient for most cases; interface allows future integration
-
-### Documentation References
-
-- Architecture: `WORKFLOW_TEST_BENCH_ARCHITECTURE.md` §17-19
-- Data Storage: `DATABASE_DESIGN.md` (Batch Test Schema)
-- Summary: `WORKFLOW_TEST_BENCH_SUMMARY.md` §7-8
 
 ---
 
-## Parallel Session Design (2024-12-23) - SUPERSEDED BY RAY DESIGN
+## ✅ Phase 0: Domain Cleanup - COMPLETED
 
-> **Note**: The ThreadPoolExecutor design below is superseded by Ray for production.
-> ThreadPoolExecutor remains available for development/testing via `BatchTestRunnerFactory`.
+**Decision:** Remove AgentGit Implementation, Preserve Session Domain Concept  
+**Completed:** 2026-01-27
 
-### Original Design Decision: Multithreading + Application-Level Isolation
+### Completed Tasks
 
-| Approach                     | Decision                | Rationale                                                     |
-| ---------------------------- | ----------------------- | ------------------------------------------------------------- |
-| **Threading Model**    | ThreadPoolExecutor      | WTB is I/O-bound (DB ops, LLM calls); GIL released during I/O |
-| **Isolation Strategy** | App-level isolation     | Each thread gets own Adapter/Controller/UoW instances         |
-| **SQLite Concurrency** | WAL mode enabled        | Allows concurrent reads, serialized writes                    |
-| **Session Cleanup**    | SessionLifecycleManager | Timeout-based cleanup for abandoned sessions                  |
+| Task | Status | Notes |
+|------|--------|-------|
+| Refactor `IStateAdapter` interface | ✅ | Removed AgentGit methods, str IDs |
+| Delete `AgentGitStateAdapter` | ✅ | Implementation removed |
+| Refactor `LangGraphStateAdapter` | ✅ | Removed ID mapping |
+| Refactor `InMemoryStateAdapter` | ✅ | Updated to str IDs |
+| Rename `agentgit_session_id` → `session_id` | ✅ | Type: `str` |
+| Rename `agentgit_checkpoint_id` → `checkpoint_id` | ✅ | Type: `str` |
+| Update `ExecutionController` | ✅ | str IDs, added `fork()` |
+| Delete `WTBTestBench.branch()` | ✅ | Was broken |
+| Move `fork()` to `ExecutionController` | ✅ | ACID compliance |
+| Clean SDK layer | ✅ | Removed `state_adapter` param |
+| Create unit tests | ✅ | `tests/test_v16_architecture/` |
 
-### New Components Designed
-
-| Component                  | Status      | Description                                                    |
-| -------------------------- | ----------- | -------------------------------------------------------------- |
-| ParallelExecutionContext   | ✓ DESIGNED | Isolated context (adapter + controller + uow) per parallel run |
-| ParallelContextFactory     | ✓ DESIGNED | Factory for creating isolated contexts                         |
-| BatchTestRunner (parallel) | ✓ DESIGNED | ThreadPoolExecutor-based parallel execution                    |
-| WAL Mode Config            | ✓ DESIGNED | SQLite WAL mode for concurrent access                          |
-| SessionLifecycleManager    | ✓ DESIGNED | Cleanup abandoned sessions                                     |
-
-### Documentation Updated
-
-- [X] `WORKFLOW_TEST_BENCH_ARCHITECTURE.md` - Section 16 added
-- [X] `WORKFLOW_TEST_BENCH_SUMMARY.md` - Section 5.5 added
-- [X] `INDEX.md` - Links to parallel design sections
-
-### Implementation TODO
-
-| Component                 | Priority | Description                       |
-| ------------------------- | -------- | --------------------------------- |
-| ParallelExecutionContext  | HIGH     | Implement isolated context class  |
-| ParallelContextFactory    | HIGH     | Implement context factory         |
-| BatchTestRunner           | HIGH     | Implement with ThreadPoolExecutor |
-| WAL Mode Config           | HIGH     | Add to database config            |
-| test_parallel_sessions.py | HIGH     | Unit tests for parallel isolation |
-| SessionLifecycleManager   | MEDIUM   | Timeout-based cleanup             |
-
----
-
----
-
-## ✅ COMPLETED TODAY (2025-01-09)
-
-### Morning: Event Bus & Audit Trail - ✓ DONE
-
-| # | Task | Status | Files Created |
-|---|------|--------|---------------|
-| 1 | **Implement `WTBEventBus`** | ✅ DONE | `wtb/infrastructure/events/wtb_event_bus.py` |
-| | - Standalone thread-safe implementation (RLock) | | |
-| | - Bounded history (deque with maxlen) | | |
-| | - Optional AgentGit bridge | | |
-| | - 20 unit tests passing | | |
-| 2 | **Implement `WTBAuditTrail`** | ✅ DONE | `wtb/infrastructure/events/wtb_audit_trail.py` |
-| | - `WTBAuditEntry` dataclass | | |
-| | - `add_entry()`, `flush()`, `to_dict()` | | |
-| | - `AuditEventListener` for auto-recording | | |
-| | - **Implement `AuditLogRepository`** | ✅ DONE | `wtb/infrastructure/database/repositories/audit_repository.py` |
-| | - Added AuditLogORM, IAuditLogRepository | | |
-| | - 27 unit tests passing | | |
-
-### Afternoon: BatchTestRunner Infrastructure - ✓ DONE
-
-| # | Task | Status | Files Created |
-|---|------|--------|---------------|
-| 3 | **Implement `IBatchTestRunner`** | ✅ DONE | `wtb/domain/interfaces/batch_runner.py` |
-| | - `run_batch_test()`, `get_status()`, `cancel()` | | |
-| | - `IEnvironmentProvider` interface | | |
-| 4 | **Implement `ThreadPoolBatchTestRunner`** | ✅ DONE | `wtb/application/services/batch_test_runner.py` |
-| | - ThreadPoolExecutor with UoW/StateAdapter factories | | |
-| | - Progress tracking, cancellation support | | |
-| | - 7 unit tests passing | | |
-| 5 | **Implement `BatchTestRunnerFactory`** | ✅ DONE | `wtb/application/factories.py` |
-| | - Factory method for ThreadPool/Ray selection | | |
-| | - Config-based switching | | |
-
-### Evening: Ray Foundation - ✓ DONE
-
-| # | Task | Status | Files Created |
-|---|------|--------|---------------|
-| 6 | **Implement `RayConfig`** | ✅ DONE | `wtb/config.py` |
-| | - Dataclass with cluster settings | | |
-| | - `for_local_development()`, `for_production()` presets | | |
-| 7 | **Stub `RayBatchTestRunner`** | ✅ STUB | `wtb/application/services/ray_batch_runner.py` |
-| | - Basic structure with `@ray.remote` decorator | | |
-| | - `VariantExecutionActor` stub | | |
-| 8 | **Create database migrations** | ✅ DONE | `wtb/infrastructure/database/migrations/` |
-| | - `002_batch_tests.sql` (SQLite) | | |
-| | - `003_postgresql_production.sql` (PostgreSQL) | | |
-| 9 | **Implement Environment Providers** | ✅ DONE | `wtb/infrastructure/environment/providers.py` |
-| | - `InProcessEnvironmentProvider` | | |
-| | - `RayEnvironmentProvider` | | |
-| | - `GrpcEnvironmentProvider` (stub) | | |
-
-### Files Created (2025-01-09)
-
-```
-wtb/
-├── domain/
-│   └── interfaces/
-│       └── batch_runner.py          [CREATED] IBatchTestRunner, IEnvironmentProvider
-├── application/
-│   ├── services/
-│       ├── batch_test_runner.py     [CREATED] ThreadPoolBatchTestRunner
-│       └── ray_batch_runner.py      [CREATED] RayBatchTestRunner (stub), VariantExecutionActor
-│   └── factories.py                 [MODIFIED] Added BatchTestRunnerFactory
-├── infrastructure/
-│   ├── events/
-│   │   ├── __init__.py              [CREATED]
-│   │   ├── wtb_event_bus.py         [CREATED] WTBEventBus
-│   │   └── wtb_audit_trail.py       [CREATED] WTBAuditTrail, AuditEventListener
-│   ├── environment/
-│   │   ├── __init__.py              [CREATED]
-│   │   └── providers.py             [CREATED] Ray/InProcess/Grpc providers
-│   └── database/
-│       ├── repositories/
-│       │   └── audit_repository.py  [CREATED] AuditLogRepository
-│       └── migrations/
-│           ├── __init__.py          [CREATED]
-│           ├── 002_batch_tests.sql  [CREATED] Batch test tables
-│           └── 003_postgresql_production.sql [CREATED] PG indexes
-├── config.py                        [MODIFIED] Added RayConfig
-└── tests/
-    └── test_wtb/
-        ├── test_event_bus.py        [CREATED] 20 tests
-        ├── test_audit_trail.py      [CREATED] 24 tests
-        ├── test_audit_repository.py [CREATED] 3 tests
-        └── test_batch_runner.py     [CREATED] 20 tests
-
-Total: 275 tests passing (was 208, +67 new tests)
-```
-
-### Success Criteria - ALL MET ✅
-
-- [x] `WTBEventBus` passes thread-safety tests (20 tests)
-- [x] `WTBAuditTrail` can flush to repository (24 tests)
-- [x] `ThreadPoolBatchTestRunner` can execute simple batch test (7 tests)
-- [x] `BatchTestRunnerFactory` correctly selects runner based on config (3 tests)
-- [x] Database migration files created
-- [x] All new code has test coverage (67 new tests)
-- [x] **AuditLogRepository implemented and tested**
-
----
-
-## TODO (Backlog)
-
-### P0 - Critical (Ray Batch Test Infrastructure)
-
-| Component                              | Priority | Description                                    | Status |
-| -------------------------------------- | -------- | ---------------------------------------------- | ------ |
-| **RayBatchTestRunner (full)**    | P0       | Complete Ray implementation with ActorPool     | ✅ STUB |
-| **VariantExecutionActor**        | P0       | Ray Actor for workflow variant execution       | ✅ STUB |
-| **ParityChecker**                | P0       | Dry-run validation for ThreadPool→Ray migration| TODO |
-| **PgBouncer Setup**              | P0       | Connection pooling for production              | TODO |
-
-### P1 - High Priority (Supporting Infrastructure)
-
-| Component                              | Priority | Description                                    | Status |
-| -------------------------------------- | -------- | ---------------------------------------------- | ------ |
-| **IEnvironmentProvider**         | P1       | Interface for environment isolation            | ✅ DONE |
-| **RayEnvironmentProvider**       | P1       | Ray runtime_env based isolation                | ✅ DONE |
-| **GrpcEnvironmentProvider**      | P1       | Adapter for colleague's gRPC env-manager       | ✅ STUB |
-| **Prometheus Metrics**           | P1       | Metric export for observability                | TODO |
-| **WAL Mode Config**              | P1       | SQLite concurrent access support               | ✅ DONE |
-| **PostgreSQL Migration**         | P1       | Production database migration scripts          | ✅ DONE |
-
-### P2 - Medium Priority
-
-| Component                              | Priority | Description                                    |
-| -------------------------------------- | -------- | ---------------------------------------------- |
-| EvaluationEngine                       | P2       | Metrics collection & scoring                   |
-| SessionLifecycleManager                | P2       | Cleanup abandoned sessions                     |
-| Error Hierarchy                        | P2       | Standardized error types and handling          |
-| OpenTelemetry Tracing                  | P2       | Distributed tracing integration                |
-| Parallel Session Tests                 | P2       | Test isolation and thread safety               |
-| Ray Integration Tests                  | P2       | Test Ray batch execution end-to-end            |
-
-### P3 - Low Priority
-
-| Component                              | Priority | Description                                    |
-| -------------------------------------- | -------- | ---------------------------------------------- |
-| FileTracker Integration                | P3       | Link checkpoints to file commits               |
-| IDE Sync                               | P3       | WebSocket events to audit UI                   |
-| AgentGit Integration Tests             | P3       | Integration tests with real AgentGit database  |
-
-## Recently Completed (2024-12-23)
-
-| Component               | Status      | Tests    |
-| ----------------------- | ----------- | -------- |
-| ~~Outbox Pattern~~     | ✅ DONE     | 26 tests |
-| ~~IntegrityChecker~~   | ✅ DONE     | 20 tests |
-| ~~Rich Domain Model~~  | ✅ DONE     | 11 tests |
-| ~~Event Bus Design~~   | ✅ DESIGNED | -        |
-| ~~Audit Trail Design~~ | ✅ DESIGNED | -        |
-
-## Database Status
-
-| Database | Location             | Status                            |
-| -------- | -------------------- | --------------------------------- |
-| AgentGit | `data/agentgit.db` | 31 checkpoints, 22 sessions       |
-| WTB      | `data/wtb.db`      | Schema created, persistence ready |
-
-## Usage Examples
-
-### Testing Mode (In-Memory)
+### Key Changes Summary
 
 ```python
-from wtb.config import WTBConfig
-from wtb.application import ExecutionControllerFactory
+# BEFORE (v1.5):
+class IStateAdapter:
+    def initialize_session(...) -> int           # AgentGit DB record
+    def save_checkpoint(...) -> int              # AgentGit checkpoint ID
+    def link_file_commit(...)                    # AgentGit-specific
+    def create_branch(...) -> int                # AgentGit session branch
 
-config = WTBConfig.for_testing()
-controller = ExecutionControllerFactory.create_for_testing()
+class Execution:
+    agentgit_session_id: Optional[int]
+    agentgit_checkpoint_id: Optional[int]
+
+class WTBTestBench:
+    def __init__(self, ..., state_adapter: IStateAdapter)
+    def branch(...) -> BranchResult              # BROKEN
+
+# AFTER (v1.6):
+class IStateAdapter:
+    def initialize_session(...) -> str           # Returns thread_id
+    def save_checkpoint(...) -> str              # Returns UUID string
+    # link_file_commit() REMOVED
+    # create_branch() REMOVED
+
+class Execution:
+    session_id: Optional[str]                    # LangGraph thread_id
+    checkpoint_id: Optional[str]                 # LangGraph UUID
+
+class WTBTestBench:
+    def __init__(self, ...)                      # NO state_adapter param
+    # branch() REMOVED
+    def fork(...) -> ForkResult                  # Delegates to controller
+
+class ExecutionController:
+    def fork(...) -> Execution                   # NEW: moved from SDK
 ```
 
-### Development Mode (SQLite)
+---
+
+## ✅ Phase 1: Unify Batch Execution - COMPLETED (v1.7)
+
+**Version:** v1.7  
+**Completed:** 2026-01-27
+
+### Completed Tasks
+
+#### TODO-006: Create ExecutionControllerFactory ✅
+**Status:** Completed | **Effort:** Medium
 
 ```python
-config = WTBConfig.for_development()
-controller = ExecutionControllerFactory.create(config)
+# v1.7 Implementation: ManagedController Pattern
+
+@dataclass
+class ManagedController:
+    """Controller with managed UoW lifecycle."""
+    controller: ExecutionController
+    uow: IUnitOfWork
+    
+    def __enter__(self) -> "ManagedController":
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self.uow.commit()
+        else:
+            self.uow.rollback()
+        self.uow.__exit__(exc_type, exc_val, exc_tb)
+
+class ExecutionControllerFactory:
+    def create_isolated(self) -> ManagedController:
+        """Create isolated controller with its own UoW (ACID Isolation)."""
+        uow = UnitOfWorkFactory.create(...)
+        uow.__enter__()
+        controller = ExecutionController(...)
+        return ManagedController(controller=controller, uow=uow)
+    
+    @classmethod
+    def get_factory_callable(cls, config) -> Callable[[], ManagedController]:
+        """Get factory callable for batch runners."""
+        factory = cls(config)
+        return factory.create_isolated
 ```
 
-### Production Mode (PostgreSQL)
+**Completed:**
+- [x] Created `ManagedController` for proper UoW lifecycle
+- [x] Created `ExecutionControllerFactory.create_isolated()` for ACID isolation
+- [x] Created `get_factory_callable()` for batch runners
+- [x] Added unit tests in `tests/test_v16_architecture/test_controller_factory.py`
 
-```python
-config = WTBConfig.for_production("postgresql://user:pass@host/db")
-controller = ExecutionControllerFactory.create(config)
-```
+---
 
-## Next Steps
+#### TODO-007: Fix ThreadPoolBatchTestRunner ✅
+**Status:** Completed | **Effort:** Medium
 
-### Completed ✓
+**Completed:**
+- [x] Injected `ExecutionControllerFactory` via `controller_factory` parameter
+- [x] Each thread calls `controller_factory()` for isolated execution
+- [x] Removed `_run_workflow_nodes()` placeholder
+- [x] Added `_extract_metrics()` for proper metric extraction
+- [x] Added integration tests in `tests/test_v16_architecture/test_batch_runner_parity.py`
 
-1. ~~Create `AgentGitStateAdapter` to replace `InMemoryStateAdapter`~~ ✓ DONE
-2. ~~Add `InMemoryUnitOfWork` for fast testing~~ ✓ DONE
-3. ~~Create factories for dependency injection~~ ✓ DONE
-4. ~~Design parallel session isolation architecture~~ ✓ DONE (Section 16)
-5. ~~Implement Outbox Pattern for cross-DB consistency~~ ✓ DONE (P0)
-6. ~~Implement IntegrityChecker for data integrity~~ ✓ DONE (P0)
-7. ~~Enhance Execution with Rich Domain Model~~ ✓ DONE (P1)
-8. ~~Design Event Bus & Audit Trail integration~~ ✓ DONE (Design)
-9. ~~Design Ray-based BatchTestRunner architecture~~ ✓ DONE (2025-01)
-10. ~~Design IEnvironmentProvider interface~~ ✓ DONE (2025-01)
-11. ~~Define data characteristics & indexing strategy~~ ✓ DONE (2025-01)
-12. ~~Implement `WTBEventBus` with thread-safety~~ ✓ DONE (2025-01-09)
-13. ~~Implement `WTBAuditTrail` and `AuditEventListener`~~ ✓ DONE (2025-01-09)
-14. ~~Implement `IBatchTestRunner` interface~~ ✓ DONE (2025-01-09)
-15. ~~Implement `ThreadPoolBatchTestRunner`~~ ✓ DONE (2025-01-09)
-16. ~~Create `BatchTestRunnerFactory`~~ ✓ DONE (2025-01-09)
-17. ~~Add `RayConfig` to `WTBConfig`~~ ✓ DONE (2025-01-09)
-18. ~~Create database migrations for batch test tables~~ ✓ DONE (2025-01-09)
-19. ~~Implement `IEnvironmentProvider` and `RayEnvironmentProvider`~~ ✓ DONE (2025-01-09)
-20. ~~Stub `RayBatchTestRunner` with `VariantExecutionActor`~~ ✓ STUB (2025-01-09)
-21. ~~Implement `IAuditLogRepository` for audit persistence~~ ✓ DONE (2025-01-09)
+---
 
-### In Progress (P0 - Full Ray Implementation)
+#### TODO-008: Fix RayBatchTestRunner ✅
+**Status:** Completed | **Effort:** Medium
 
-22. **Complete `RayBatchTestRunner` implementation** ← NEXT
-23. **Complete `VariantExecutionActor` with ExecutionController integration** ← NEXT
-24. **Implement `ParityChecker` for ThreadPool→Ray migration** ← NEXT
+**Completed:**
+- [x] Updated Actor to use ExecutionController pattern consistently
+- [x] Fixed str ID references (`checkpoint_id` instead of `agentgit_checkpoint_id`)
+- [x] Added variant info to initial state (like ThreadPoolBatchTestRunner)
+- [x] Updated docstrings for ACID compliance documentation
 
-### Upcoming (P1)
+---
 
-25. Implement `EvaluationEngine` for metrics collection
-26. Implement `SessionLifecycleManager` for cleanup
-27. Add Prometheus metrics export
-28. Configure PgBouncer for production
+## ✅ ISS-006: Outbox Processor Lifecycle - COMPLETED (v1.7)
 
-### Future (P2-P3)
+**Status:** Completed | **Completed:** 2026-01-27
 
-29. Implement `GrpcEnvironmentProvider` for existing env-manager
-30. Add comprehensive Ray integration tests
-31. IDE sync WebSocket events
+### Implementation
+
+Created `OutboxLifecycleManager` in `wtb/infrastructure/outbox/lifecycle.py`:
+
+| Feature | Implementation |
+|---------|----------------|
+| Auto-start | `auto_start=True` on init |
+| Health endpoint | `get_health()` returns `HealthStatus` |
+| Graceful shutdown | `register_signals=True` + `atexit` hooks |
+| Callbacks | `on_start`, `on_stop`, `on_error` |
+| Context manager | `__enter__` / `__exit__` protocol |
+
+**Tests:** `tests/test_v16_architecture/test_outbox_lifecycle.py`
+
+---
+
+## ✅ Architecture Consolidation (2026-01-27) - COMPLETED
+
+**Issue Reference:** `docs/Project_Init/new_issues.md`
+
+### Issues Resolved
+
+| Issue | Category | Status | Resolution |
+|-------|----------|--------|------------|
+| CRITICAL-001 | Dual Checkpoint-File Storage | ✅ Fixed | Deleted `CheckpointFileORM`, use `CheckpointFileLinkORM` |
+| CRITICAL-002 | Dual Repository Interfaces | ✅ Fixed | Use `ICheckpointFileLinkRepository` only |
+| HIGH-001 | Event Base Class Inconsistency | ✅ Fixed | `CheckpointEvent` extends `WTBEvent` |
+| HIGH-002 | Deprecated Code Still Exported | ✅ Fixed | Created `_deprecated.py`, added comments |
+| MEDIUM-001 | SRP Violation in file_processing.py | ✅ Fixed | Split into package (already done) |
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `wtb/infrastructure/database/models.py` | DELETED `CheckpointFileORM` |
+| `wtb/infrastructure/database/__init__.py` | Updated exports to use `CheckpointFileLinkORM` |
+| `wtb/domain/events/checkpoint_events.py` | `CheckpointEvent` now extends `WTBEvent` |
+| `wtb/domain/interfaces/_deprecated.py` | NEW: Deprecated interface documentation |
+| `wtb/domain/interfaces/__init__.py` | Added deprecation comments |
+| `wtb/domain/interfaces/repositories.py` | REMOVED legacy methods from `INodeBoundaryRepository` |
+| `wtb/infrastructure/database/inmemory_unit_of_work.py` | REMOVED legacy methods |
+| `wtb/infrastructure/database/migrations/004_consolidate_checkpoint_files.sql` | NEW: Migration script |
+
+### New Tests
+
+| Test File | Purpose |
+|-----------|---------|
+| `tests/test_wtb/test_architecture_consolidation.py` | Unit tests for consolidation |
+| `tests/test_wtb/test_migration_integration.py` | Integration tests for migration |
+
+---
+
+## 📋 Phase 2: Final Cleanup - IN PROGRESS
+
+**Target Version:** v1.8  
+**Target Date:** 2026-03-01
+
+### Completed Tasks (v1.7)
+
+#### TODO-010: Move _project_to_workflow to ProjectService ✅
+**Status:** Completed | **Effort:** Low
+
+**Completed:**
+- [x] Created `WorkflowConversionService` in `wtb/application/services/project_service.py`
+- [x] Updated SDK to delegate to `WorkflowConversionService`
+- [x] Proper layer separation (SDK → Application → Domain)
+
+---
+
+#### TODO-011: Fix UoW Lifecycle in Factories ✅
+**Status:** Completed | **Effort:** Medium
+
+**Completed:**
+- [x] Created `ManagedController` with proper `__enter__`/`__exit__`
+- [x] UoW properly committed/rolled back in context manager
+- [x] Added tests in `test_controller_factory.py`
+
+---
+
+### Remaining TODO
+
+#### TODO-012: Implement gRPC API
+**Status:** Not Started | **Effort:** Medium
+
+**Tasks:**
+- [ ] Implement gRPC server from existing protos
+- [ ] Add gRPC client to SDK
+
+---
+
+## 📋 v2.0 Async Architecture - PLANNING
+
+**Target Version:** v2.0  
+**Status:** Planning (Architecture Document Reviewed)  
+**Architecture Document:** [ASYNC_ARCHITECTURE_PLAN.md](./ASYNC_ARCHITECTURE_PLAN.md)
+
+### Planning Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Architecture Design | ✅ Complete | `ASYNC_ARCHITECTURE_PLAN.md` v1.0 |
+| Code Review | ✅ Complete | 10 issues fixed, 4 suggestions added |
+| Document Update | ✅ Complete | v1.1 incorporates all review feedback |
+| Implementation | 🔜 Pending | Waiting for v1.8 completion |
+
+### Review Summary (2026-01-27)
+
+| Priority | Issue | Fix |
+|----------|-------|-----|
+| P0 | `aiofiles.os.path.exists()` doesn't exist | Use `_path_exists()` helper with `aiofiles.os.stat()` |
+| P0 | `run_until_complete()` in async context | Lazy graph compilation + `aset_workflow_graph()` |
+| P0 | `__aexit__` missing try/finally | Wrapped rollback in try/finally |
+| P1 | Streaming error leaves RUNNING state | Added try/except with status update |
+| P1 | Cross-DB checkpoint verification | Added `CHECKPOINT_VERIFY` outbox event |
+| P1 | Saga compensation error handling | Track and raise `CompensationError` |
+| P2 | Dual interface violates ISP | Separate `IStateAdapter` / `IAsyncStateAdapter` |
+| P2 | Outbox event ordering | Added `order_by="created_at"` FIFO guarantee |
+| P3 | asyncpg for production | Added `[production]` optional dependency group |
+
+### Best Practices Added
+
+- ✅ Connection pool management (`AsyncSQLAlchemyUnitOfWork._engine_pool`)
+- ✅ Async health checks (`check_async_health()`)
+- ✅ Structured logging (`@log_async_operation` decorator)
+- ✅ Typed AsyncContextManager factory (`get_async_uow()`)
+
+### Implementation Roadmap
+
+| Phase | Timeframe | Focus |
+|-------|-----------|-------|
+| A | Week 1-2 | Async interfaces (`IAsyncStateAdapter`, `IAsyncUnitOfWork`) |
+| B | Week 3-4 | Async infrastructure (DB, Files, Adapters) |
+| C | Week 5-6 | Async application services (`AsyncExecutionController`) |
+| D | Week 7-8 | Integration, testing, documentation |
+
+---
+
+## Component Status
+
+### 1. Domain Layer (`wtb/domain/`) - ✅ 100%
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Models** | ✅ Done | `Execution` uses str IDs |
+| **Events** | ✅ Done | 70+ event types |
+| **Interfaces** | ✅ Done | `IStateAdapter` cleaned (v1.6) |
+
+### 2. Application Layer (`wtb/application/`) - ✅ 100%
+
+| Service | Status | Notes |
+|---------|--------|-------|
+| `ExecutionController` | ✅ | str IDs, has `fork()` |
+| `RayBatchRunner` | ✅ | ACID compliant (Actor isolation) |
+| `BatchTestRunner` | ✅ | Uses ExecutionControllerFactory |
+
+### 3. Infrastructure Layer (`wtb/infrastructure/`) - ✅ 100%
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `LangGraphStateAdapter` | ✅ | PRIMARY, str IDs native |
+| `InMemoryStateAdapter` | ✅ | str IDs |
+| `AgentGitStateAdapter` | ❌ DELETED | Removed in v1.6 |
+
+### 4. SDK Layer (`wtb/sdk/`) - ✅ 100%
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `TestBench` | ✅ | Clean, no `state_adapter` |
+| `branch()` | ❌ DELETED | Removed in v1.6 |
+| `fork()` | ✅ | Delegates to controller |
+
+### 5. Test Coverage
+
+| Test Category | Status | Notes |
+|---------------|--------|-------|
+| `test_v16_architecture/` | ✅ NEW | str IDs, fork tests |
+| `test_wtb/` | ✅ | ~85% coverage |
+| `test_langgraph/` | ✅ | ~90% coverage |
+
+---
+
+## Architecture Compliance (Post-v1.6)
+
+### SOLID Principles
+
+| Principle | Status | Evidence |
+|-----------|--------|----------|
+| **S**ingle Responsibility | ✅ | `IStateAdapter` focused |
+| **O**pen/Closed | ✅ | New adapters via interface |
+| **L**iskov Substitution | ✅ | All str IDs |
+| **I**nterface Segregation | ✅ | ~15 methods (was 20+) |
+| **D**ependency Inversion | ✅ | SDK uses only App services |
+
+### ACID Compliance
+
+| Property | Status | Notes |
+|----------|--------|-------|
+| **A**tomicity | ✅ | UoW pattern |
+| **C**onsistency | ✅ | Unified str types |
+| **I**solation | ✅ | ManagedController & Actor Isolation |
+| **D**urability | ✅ | SQLite/PostgreSQL |
+
+---
+
+## Version Roadmap
+
+| Version | Focus | Target | Status |
+|---------|-------|--------|--------|
+| v1.5 | Initial release | 2026-01-20 | ✅ Released |
+| **v1.6** | **Phase 0: Domain Cleanup** | 2026-01-27 | **✅ COMPLETED** |
+| **v1.7** | **Phase 1: Batch Unify, ISS-006** | 2026-01-27 | **✅ COMPLETED** |
+| v1.8 | Phase 2: gRPC API | 2026-03-01 | Planned |
+| **v2.0** | **Full Async Architecture** | 2026-04-01 | **PROPOSED** |
+
+### v2.0 Async Architecture (PROPOSED)
+
+**Reference:** [ASYNC_ARCHITECTURE_PLAN.md](./ASYNC_ARCHITECTURE_PLAN.md)
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Phase A | Async Interfaces (IAsyncStateAdapter, IAsyncUnitOfWork) | Week 1-2 |
+| Phase B | Async Infrastructure (DB, Files, LangGraph) | Week 3-4 |
+| Phase C | Async Application Services (AsyncExecutionController) | Week 5-6 |
+| Phase D | Integration, Migration, Documentation | Week 7-8 |
+
+**Key Features:**
+- Non-blocking I/O across all layers
+- Native LangGraph async (ainvoke, astream)
+- Async file tracking (aiofiles)
+- Async SQLAlchemy 2.0 (aiosqlite, asyncpg)
+- Backward compatibility via ExecutionControllerCompat
+
+---
+
+## File Changes Summary (v1.6)
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `wtb/domain/interfaces/state_adapter.py` | Refactored: str IDs, removed AgentGit methods |
+| `wtb/domain/models/workflow.py` | Renamed: `session_id`, `checkpoint_id` (str) |
+| `wtb/infrastructure/adapters/inmemory_state_adapter.py` | Updated: str IDs |
+| `wtb/infrastructure/adapters/langgraph_state_adapter.py` | Refactored: removed ID mapping |
+| `wtb/infrastructure/adapters/__init__.py` | Removed AgentGitStateAdapter export |
+| `wtb/application/services/execution_controller.py` | Added `fork()`, str IDs |
+| `wtb/application/factories.py` | Removed state_adapter from WTBTestBench |
+| `wtb/sdk/test_bench.py` | Removed `branch()`, `state_adapter` param |
+
+### Deleted Files
+
+| File | Reason |
+|------|--------|
+| `wtb/infrastructure/adapters/agentgit_state_adapter.py` | AgentGit implementation removed |
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `tests/test_v16_architecture/__init__.py` | Test package for v1.6 |
+| `tests/test_v16_architecture/test_string_ids.py` | str ID compliance tests |
+| `tests/test_v16_architecture/test_execution_controller_fork.py` | fork() tests |
+
+---
+
+## File Changes Summary (v1.7)
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `wtb/application/factories.py` | Added `ManagedController`, `ExecutionControllerFactory.create_isolated()`, `get_factory_callable()` |
+| `wtb/application/services/batch_test_runner.py` | Refactored to use `controller_factory`, removed placeholder `_run_workflow_nodes()` |
+| `wtb/application/services/ray_batch_runner.py` | Fixed str ID refs, updated to use ExecutionController pattern |
+| `wtb/application/services/project_service.py` | Added `WorkflowConversionService` |
+| `wtb/application/services/__init__.py` | Exported `WorkflowConversionService` |
+| `wtb/sdk/test_bench.py` | Delegates `_project_to_workflow` to `WorkflowConversionService` |
+| `wtb/infrastructure/outbox/__init__.py` | Exported lifecycle components |
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `wtb/infrastructure/outbox/lifecycle.py` | `OutboxLifecycleManager` for ISS-006 |
+| `tests/test_v16_architecture/test_controller_factory.py` | Tests for `ManagedController`, factory isolation |
+| `tests/test_v16_architecture/test_batch_runner_parity.py` | Tests for batch runner ACID compliance |
+| `tests/test_v16_architecture/test_outbox_lifecycle.py` | Tests for `OutboxLifecycleManager` |
+
+---
+
+## Code Quality Audit (2026-01-27)
+
+### Issues Fixed
+
+| Issue | Category | Status | Location |
+|-------|----------|--------|----------|
+| `BranchResult` imported but doesn't exist | Code Error | ✅ Fixed | `wtb/sdk/__init__.py` |
+| `IWorkflowRepository` missing `list_all()` | ISP Gap | ✅ Fixed | Interface + implementations |
+| Duplicate `_create_state_adapter()` code | DRY Violation | ✅ Fixed | `WTBTestBenchFactory` now delegates |
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `wtb/sdk/__init__.py` | Removed `BranchResult` import/export (dead code from v1.6 branch() removal) |
+| `wtb/domain/interfaces/repositories.py` | Added `list_all()` to `IWorkflowRepository` interface |
+| `wtb/infrastructure/database/repositories/base.py` | Added `list_all()` to `BaseRepository` |
+| `wtb/infrastructure/database/inmemory_unit_of_work.py` | Added `list_all()` to `InMemoryWorkflowRepository` |
+| `wtb/infrastructure/database/repositories/workflow_repository.py` | Added `list_all()` override |
+| `wtb/application/factories.py` | `WTBTestBenchFactory._create_state_adapter()` now delegates to `ExecutionControllerFactory._create_state_adapter()` (DRY) |
+
+### Architecture Observations
+
+**SOLID Compliance:**
+- ✅ SRP: Services have clear responsibilities
+- ✅ OCP: New adapters via interface implementations
+- ✅ LSP: All adapters work interchangeably (str IDs)
+- ✅ ISP: Interfaces are focused (~15 methods in IStateAdapter)
+- ✅ DIP: SDK depends on Application services, not Infrastructure
+
+**ACID Compliance:**
+- ✅ Atomicity: UoW pattern with explicit commit()
+- ✅ Consistency: Unified str ID types across layers
+- ✅ Isolation: ManagedController provides isolated UoW per execution
+- ✅ Durability: SQLite/PostgreSQL persistence
+
+**Deprecation Note:**
+- `IStateAdapter` is marked DEPRECATED but still heavily used
+- `ICheckpointStore` is the "new" primary interface but not yet integrated
+- This is an architectural decision for gradual migration (not a bug)
+
+---
+
+## Related Documents
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE_ISSUES.md](./ARCHITECTURE_ISSUES.md) | Consolidated issues analysis |
+| [ARCHITECTURE_STRUCTURE.md](./ARCHITECTURE_STRUCTURE.md) | Code structure |
+| [INDEX.md](./INDEX.md) | Documentation hub |

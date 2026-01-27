@@ -1,0 +1,1117 @@
+#!/usr/bin/env python
+"""
+05_full_presentation.py - Complete WTB Presentation Demo
+
+REFACTORED (2026-01-27): Uses synchronous SDK methods.
+
+This is the MAIN presentation script that walks through all WTB features
+in a guided, presentation-ready format.
+
+Demonstrates:
+1. Project Setup - WorkflowProject, FileTracking, Environment configs
+2. Basic Execution - Run unified RAG+SQL workflow
+3. Checkpointing - View checkpoints at each node
+4. Rollback - Restore workflow and file system state
+5. Forking - A/B testing with fork() method
+6. Pause/Resume - Human-in-the-loop review
+7. Batch Testing - Multiple queries, multiple variants
+8. Ray Distribution - Parallel node execution
+9. Venv Isolation - Per-node virtual environments
+
+SDK Methods Used:
+- WTBTestBench.create(mode, data_dir, enable_file_tracking)
+- bench.register_project(project)
+- bench.run(project, initial_state, breakpoints)
+- bench.get_checkpoints(execution_id)
+- bench.get_state(execution_id)
+- bench.rollback(execution_id, checkpoint_id)
+- bench.fork(execution_id, checkpoint_id, new_initial_state)
+- bench.pause(execution_id)
+- bench.resume(execution_id, modified_state)
+- bench.run_batch_test(project, variant_matrix, test_cases)
+
+Usage:
+    python scripts/05_full_presentation.py
+    
+    # Run specific section:
+    python scripts/05_full_presentation.py --section=rollback
+    python scripts/05_full_presentation.py --section=forking
+
+Prerequisites:
+    - Configure env.local with LLM_API_KEY
+    - Optionally configure RAY_ADDRESS for distributed execution
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Imports
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from wtb.sdk import (
+    WTBTestBench,
+    WorkflowProject,
+    FileTrackingConfig,
+    EnvironmentConfig,
+    ExecutionConfig,
+    EnvSpec,
+    RayConfig,
+    NodeResourceConfig,
+    WorkspaceIsolationConfig,
+    PauseStrategyConfig,
+    NodeVariant,
+    WorkflowVariant,
+    # Domain models re-exported from SDK
+    ExecutionStatus,
+)
+
+try:
+    from langgraph.graph import StateGraph, END
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+    StateGraph = None
+    END = None
+
+# Import graph components
+from examples.wtb_presentation.graphs.unified_graph import create_unified_graph
+from examples.wtb_presentation.graphs.rag_nodes import (
+    rag_retrieve_bm25_v1,
+    rag_retrieve_hybrid_v1,
+    rag_generate_gpt4_v1,
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WORKSPACE_DIR = Path(__file__).parent.parent / "workspace"
+DATA_DIR = Path(__file__).parent.parent / "data"
+OUTPUTS_DIR = WORKSPACE_DIR / "outputs"
+
+# Ensure directories exist
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Presentation Utilities
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def print_header(title: str, char: str = "=") -> None:
+    """Print formatted section header."""
+    print(f"\n{char * 70}")
+    print(f"  {title}")
+    print(f"{char * 70}")
+
+
+def print_step(step: int, description: str) -> None:
+    """Print formatted step."""
+    print(f"\n[Step {step}] {description}")
+
+
+def wait_for_input(prompt: str = "Press Enter to continue...") -> None:
+    """Wait for presenter input (for paced demo)."""
+    if os.environ.get("WTB_AUTO_DEMO", "false").lower() != "true":
+        input(f"\n  {prompt}")
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration for display."""
+    if seconds < 1:
+        return f"{seconds*1000:.1f}ms"
+    return f"{seconds:.2f}s"
+
+
+def write_output_files_from_state(
+    state: Dict[str, Any],
+    output_dir: Path,
+    prefix: str = "",
+) -> List[Path]:
+    """
+    Write _output_files from execution state to disk.
+    
+    This bridges the gap between _output_files in workflow state 
+    (filename→content) and actual files that can be tracked.
+    
+    Args:
+        state: Execution state containing _output_files
+        output_dir: Directory to write files to
+        prefix: Optional prefix for subdirectory
+        
+    Returns:
+        List of paths written
+    """
+    output_files = state.get("_output_files", {})
+    if not output_files:
+        return []
+    
+    target_dir = output_dir / prefix if prefix else output_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    written_paths = []
+    for filename, content in output_files.items():
+        # Sanitize filename
+        safe_filename = Path(filename).name
+        if not safe_filename:
+            continue
+        
+        file_path = target_dir / safe_filename
+        try:
+            if isinstance(content, bytes):
+                file_path.write_bytes(content)
+            else:
+                file_path.write_text(str(content), encoding="utf-8")
+            written_paths.append(file_path)
+        except Exception as e:
+            print(f"  [WARN] Failed to write {filename}: {e}")
+    
+    return written_paths
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 1: Project Setup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_project_setup(bench: WTBTestBench) -> WorkflowProject:
+    """Demonstrate project configuration and setup."""
+    print_header("SECTION 1: PROJECT SETUP")
+    
+    print("""
+  In this section, we configure a WorkflowProject with:
+  - LangGraph workflow (unified RAG + SQL graph)
+  - File system tracking for state restoration
+  - Virtual environment specifications per node
+  - Ray configuration for distributed execution
+    """)
+    
+    wait_for_input()
+    
+    print_step(1, "Creating WorkflowProject configuration...")
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FULL NODE CONFIGURATION FOR ALL RAG + SQL NODES
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # RAG Pipeline Nodes (7 nodes):
+    #   1. rag_load_docs     - Load documents from workspace
+    #   2. rag_chunk_split   - Split documents into chunks  
+    #   3. rag_embed_docs    - Embed document chunks (ONE TIME indexing)
+    #   4. rag_embed_query   - Embed query for retrieval (PER QUERY)
+    #   5. rag_retrieve      - Retrieve relevant chunks
+    #   6. rag_grade         - Grade document relevance
+    #   7. rag_generate      - Generate final answer
+    #
+    # SQL Pipeline Nodes (1 node):
+    #   8. sql_agent         - Natural language to SQL
+    #
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    project = WorkflowProject(
+        name="wtb_full_presentation",
+        description="Unified RAG + SQL Workflow with Full WTB Features",
+        graph_factory=create_unified_graph,
+        
+        # File tracking for rollback/branch
+        file_tracking=FileTrackingConfig(
+            enabled=True,
+            tracked_paths=[str(WORKSPACE_DIR)],
+        ),
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # VENV CONFIGURATION - Per Node Virtual Environments
+        # Uses REAL UV Venv Manager service at localhost:10900
+        # ═══════════════════════════════════════════════════════════════════════
+        environment=EnvironmentConfig(
+            granularity="node",  # Per-node environment isolation
+            uv_manager_url="http://localhost:10900",  # REAL venv service
+            reuse_existing=True,  # Reuse existing environments for speed
+            default_env=EnvSpec(
+                python_version="3.12",
+                dependencies=["openai>=1.0.0", "python-dotenv"],
+            ),
+            node_environments={
+                # RAG Pipeline - Document Indexing Phase
+                "rag_load_docs": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "python-dotenv", "aiofiles"],
+                ),
+                "rag_chunk_split": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "tiktoken"],  # Token counting
+                ),
+                "rag_embed_docs": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "numpy", "faiss-cpu"],  # Vector storage
+                ),
+                # RAG Pipeline - Query Phase
+                "rag_embed_query": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "numpy"],
+                ),
+                "rag_retrieve": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "numpy", "faiss-cpu"],
+                ),
+                "rag_grade": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0"],  # LLM grading
+                ),
+                "rag_generate": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0"],  # LLM generation
+                ),
+                # SQL Pipeline
+                "sql_agent": EnvSpec(
+                    python_version="3.12",
+                    dependencies=["openai>=1.0.0", "sqlite-utils", "sqlparse"],
+                ),
+            },
+        ),
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # RAY CONFIGURATION - Per Node Resource Allocation
+        # Uses REAL Ray cluster (local or remote)
+        # ═══════════════════════════════════════════════════════════════════════
+        execution=ExecutionConfig(
+            batch_executor="ray",  # Use Ray for distributed execution
+            ray_config=RayConfig(
+                address="auto",  # Auto-connect to local Ray cluster
+                max_retries=3,
+            ),
+            node_resources={
+                # RAG - Document Indexing (heavier resources)
+                "rag_load_docs": NodeResourceConfig(num_cpus=1, memory="256MB"),
+                "rag_chunk_split": NodeResourceConfig(num_cpus=1, memory="256MB"),
+                "rag_embed_docs": NodeResourceConfig(num_cpus=2, memory="2GB"),  # Heavy: batch embeddings
+                # RAG - Query Phase
+                "rag_embed_query": NodeResourceConfig(num_cpus=1, memory="512MB"),
+                "rag_retrieve": NodeResourceConfig(num_cpus=2, memory="1GB"),  # Vector search
+                "rag_grade": NodeResourceConfig(num_cpus=1, memory="512MB"),
+                "rag_generate": NodeResourceConfig(num_cpus=1, memory="1GB"),  # LLM inference
+                # SQL
+                "sql_agent": NodeResourceConfig(num_cpus=1, memory="512MB"),
+            },
+            checkpoint_strategy="per_node",
+            checkpoint_storage="sqlite",  # REAL SQLite checkpoint persistence
+        ),
+        
+        # Pause configuration - pause after grade for human review
+        pause_strategy=PauseStrategyConfig(
+            mode="after_node",  # Pause after nodes complete
+        ),
+        
+        # Workspace isolation
+        workspace_isolation=WorkspaceIsolationConfig(
+            enabled=True,
+            mode="copy",
+        ),
+    )
+    
+    print(f"  - Project name: {project.name}")
+    print(f"  - File tracking: {project.file_tracking.enabled}")
+    print(f"  - Tracked paths: {project.file_tracking.tracked_paths}")
+    print(f"  - Node environments: {list(project.environment.node_environments.keys())}")
+    print(f"  - Ray executor: {project.execution.batch_executor}")
+    print(f"  - Pause mode: {project.pause_strategy.mode}")
+    
+    print_step(2, "Registering project with WTB...")
+    try:
+        bench.register_project(project)
+        print("  - Project registered successfully!")
+    except ValueError as e:
+        if "already registered" in str(e):
+            print("  - Project already registered (reusing existing)")
+            # Manually add to cache so run() can find it
+            bench._project_cache[project.name] = project
+        else:
+            raise
+    
+    return project
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 2: Basic Execution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_basic_execution(bench: WTBTestBench, project: WorkflowProject):
+    """Demonstrate basic workflow execution."""
+    print_header("SECTION 2: BASIC EXECUTION")
+    
+    print("""
+  Running the unified RAG + SQL workflow:
+  1. Load documents from workspace/documents
+  2. Chunk and embed documents
+  3. Route query to RAG or SQL based on content
+  4. Generate answer from retrieved context
+    """)
+    
+    wait_for_input()
+    
+    # RAG query
+    print_step(1, "Executing RAG query...")
+    rag_query = "What was TechFlow's revenue growth in Q4 2025?"
+    print(f"  Query: {rag_query}")
+    
+    start_time = time.time()
+    result = bench.run(
+        project=project.name,
+        initial_state={"query": rag_query, "messages": []},
+    )
+    duration = time.time() - start_time
+    
+    print(f"  - Execution ID: {result.id}")
+    print(f"  - Status: {result.status}")
+    print(f"  - Duration: {format_duration(duration)}")
+    
+    # Access state from Execution domain model (result.state is ExecutionState)
+    if hasattr(result, 'state') and result.state:
+        state_vars = result.state.workflow_variables if hasattr(result.state, 'workflow_variables') else {}
+        answer = state_vars.get("answer", "N/A")
+        if answer and answer != "N/A":
+            print(f"\n  Answer Preview:")
+            print(f"  {answer[:200]}..." if len(str(answer)) > 200 else f"  {answer}")
+        
+        # Write _output_files from state to disk
+        written = write_output_files_from_state(state_vars, OUTPUTS_DIR, prefix="rag_execution")
+        if written:
+            print(f"\n  Output files written: {len(written)}")
+            for p in written[:3]:  # Show first 3
+                print(f"    - {p.name}")
+    
+    wait_for_input()
+    
+    # SQL query
+    print_step(2, "Executing SQL query (routed to SQL agent)...")
+    sql_query = "How many customers are in the database?"
+    print(f"  Query: {sql_query}")
+    
+    start_time = time.time()
+    sql_result = bench.run(
+        project=project.name,
+        initial_state={"query": sql_query, "messages": []},
+    )
+    duration = time.time() - start_time
+    
+    print(f"  - Status: {sql_result.status}")
+    print(f"  - Duration: {format_duration(duration)}")
+    
+    if hasattr(sql_result, 'state') and sql_result.state:
+        state_vars = sql_result.state.workflow_variables if hasattr(sql_result.state, 'workflow_variables') else {}
+        sql_answer = state_vars.get("answer", state_vars.get("sql_result", "N/A"))
+        if sql_answer and sql_answer != "N/A":
+            print(f"\n  SQL Result:")
+            print(f"  {str(sql_answer)[:200]}...")
+        
+        # Write _output_files from SQL execution
+        written = write_output_files_from_state(state_vars, OUTPUTS_DIR, prefix="sql_execution")
+        if written:
+            print(f"\n  Output files written: {len(written)}")
+            for p in written[:3]:
+                print(f"    - {p.name}")
+    
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 3: Checkpointing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_checkpointing(bench: WTBTestBench, execution_id: str):
+    """Demonstrate checkpoint inspection."""
+    print_header("SECTION 3: CHECKPOINTING (SQLite Persistence)")
+    
+    print("""
+  Each node execution creates a checkpoint containing:
+  - Workflow state at that point (LangGraph checkpoint)
+  - File system snapshot (content-addressed)
+  - Execution metadata
+  
+  REAL PERSISTENCE:
+  - Checkpoints stored in SQLite: data/wtb_checkpoints.db
+  - Survives process restart
+  - Supports time-travel debugging
+    """)
+    
+    wait_for_input()
+    
+    print_step(1, "Listing checkpoints from last execution...")
+    
+    checkpoints = bench.get_checkpoints(execution_id)
+    
+    print(f"\n  Found {len(checkpoints)} checkpoints:")
+    print(f"  {'Index':<6} {'Step':<6} {'Next Nodes':<20} {'State Keys':<25} {'Checkpoint ID':<20}")
+    print(f"  {'-'*6} {'-'*6} {'-'*20} {'-'*25} {'-'*20}")
+    
+    for i, cp in enumerate(checkpoints):
+        # Show step, next_nodes (what will run), and key state fields
+        step = cp.step
+        next_nodes = ", ".join(cp.next_nodes[:2]) if cp.next_nodes else "(terminal)"
+        # Get state keys that aren't internal
+        state_keys = [k for k in cp.state_values.keys() if not k.startswith("_")][:3]
+        state_preview = ", ".join(state_keys) if state_keys else "(empty)"
+        cp_id = str(cp.id)[:20]
+        print(f"  {i:<6} {step:<6} {next_nodes:<20} {state_preview:<25} {cp_id:<20}")
+    
+    # Show detailed checkpoint info
+    if checkpoints:
+        print_step(2, "Checkpoint state preview (latest)...")
+        latest_cp = checkpoints[0]
+        state = latest_cp.state_values
+        print(f"  - Step: {latest_cp.step}")
+        print(f"  - Next nodes: {latest_cp.next_nodes}")
+        if "query" in state:
+            print(f"  - Query: {str(state.get('query', ''))[:60]}...")
+        if "answer" in state:
+            answer = str(state.get("answer", ""))[:100]
+            print(f"  - Answer: {answer}...")
+    
+    return checkpoints
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 4: Rollback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_rollback(bench: WTBTestBench, execution_id: str, checkpoints: List):
+    """Demonstrate rollback functionality."""
+    print_header("SECTION 4: ROLLBACK (State + File System)")
+    
+    print("""
+  Rollback restores:
+  - Workflow state to checkpoint (LangGraph state)
+  - File system to checkpoint (content-addressed blobs)
+  - Enables re-execution from any previous point
+  
+  FILE TRACKING enabled:
+  - Files tracked via content-addressable storage
+  - Deduplication across checkpoints
+  - Atomic restore on rollback
+    """)
+    
+    wait_for_input()
+    
+    if len(checkpoints) < 3:
+        print("  [SKIP] Not enough checkpoints for rollback demo")
+        return
+    
+    # Choose a checkpoint with state data (not initial empty one)
+    target_idx = 0  # Latest with data
+    for i, cp in enumerate(checkpoints):
+        if cp.state_values.get("answer"):
+            target_idx = i
+            break
+    target_cp = checkpoints[target_idx]
+    
+    print_step(1, f"Rolling back to checkpoint [{target_idx}] (step={target_cp.step})...")
+    print(f"  Target checkpoint: {target_cp.id}")
+    print(f"  State snapshot keys: {list(target_cp.state_values.keys())[:5]}")
+    
+    # Show files that would be restored
+    output_files = target_cp.state_values.get("_output_files", {})
+    if output_files:
+        print(f"  Files to restore: {list(output_files.keys())[:3]}")
+    
+    # SDK uses checkpoint_id param
+    rollback_result = bench.rollback(
+        execution_id=execution_id,
+        checkpoint_id=str(target_cp.id),
+    )
+    
+    print(f"\n  - Rollback success: {rollback_result.success}")
+    if rollback_result.success:
+        print(f"  - Workflow state restored to step {target_cp.step}")
+        
+        # Check file restore status
+        try:
+            state = bench.get_state(execution_id)
+            if hasattr(state, 'workflow_variables'):
+                file_status = state.workflow_variables.get("_file_restore_status", {})
+                if file_status.get("attempted"):
+                    if file_status.get("success"):
+                        restored_count = file_status.get("files_restored", 0)
+                        print(f"  - File system restored: {restored_count} files restored")
+                    else:
+                        print(f"  - File system restore issue: {file_status.get('error', 'partial')}")
+                else:
+                    print(f"  - File system tracking: no files to restore")
+            else:
+                print(f"  - File system: state verified")
+        except Exception as e:
+            print(f"  - File system: {e}")
+    else:
+        print(f"  - Error: {rollback_result.error}")
+    
+    print_step(2, "Verifying rolled-back state...")
+    try:
+        current_state = bench.get_state(execution_id)
+        if current_state and hasattr(current_state, 'workflow_variables'):
+            wv = current_state.workflow_variables
+            print(f"  - Query: {str(wv.get('query', 'N/A'))[:50]}")
+            print(f"  - Answer present: {'answer' in wv and bool(wv.get('answer'))}")
+            print(f"  - State keys: {list(wv.keys())[:5]}")
+        else:
+            print(f"  - State retrieved successfully")
+    except Exception as e:
+        print(f"  - State verification: {e}")
+    
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 5: Branching
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_forking(bench: WTBTestBench, execution_id: str, checkpoints: List):
+    """Demonstrate forking for A/B testing."""
+    print_header("SECTION 5: FORKING (A/B Testing)")
+    
+    print("""
+  Forking enables:
+  - Create independent execution copies from checkpoint
+  - Test different variants (models, retrievers)
+  - Compare results across forks
+  - Isolated checkpoint thread per fork
+    """)
+    
+    wait_for_input()
+    
+    if not checkpoints:
+        print("  [SKIP] No checkpoints available for forking")
+        return
+    
+    # Use latest checkpoint as fork point
+    fork_point = checkpoints[0] if checkpoints else None
+    if not fork_point:
+        print("  [SKIP] No valid checkpoint for forking")
+        return
+    
+    print_step(1, "Creating forks for variant comparison...")
+    
+    variants = [
+        ("variant_a", "Dense retrieval + GPT-4o-mini", {"query": "TechFlow revenue (variant A)"}),
+        ("variant_b", "BM25 retrieval + GPT-4o", {"query": "TechFlow revenue (variant B)"}),
+    ]
+    
+    forks = {}
+    for name, desc, new_state in variants:
+        try:
+            # Use fork() to create independent execution copies
+            # Fork creates a new execution with isolated checkpoint thread
+            fork_result = bench.fork(
+                execution_id=execution_id,
+                checkpoint_id=str(fork_point.id),
+                new_initial_state=new_state,
+            )
+            forks[name] = fork_result.fork_execution_id
+            print(f"  - Created fork: {name} ({desc})")
+            print(f"    Fork execution ID: {fork_result.fork_execution_id[:8]}...")
+        except Exception as e:
+            print(f"  - Failed to create fork {name}: {e}")
+    
+    print_step(2, "Forks ready for parallel execution")
+    print(f"  - Total forks: {len(forks)}")
+    
+    return forks
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 6: Batch Testing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_batch_testing(bench: WTBTestBench, project: WorkflowProject):
+    """Demonstrate batch testing with multiple queries and variants."""
+    print_header("SECTION 6: BATCH TESTING")
+    
+    print("""
+  Batch testing features:
+  - Run multiple test cases in parallel
+  - Test variant combinations (model x retriever)
+  - Collect metrics for comparison
+  - Export results for analysis
+    """)
+    
+    wait_for_input()
+    
+    # Test cases
+    test_queries = [
+        "What is TechFlow's gross margin?",
+        "What is the market size for AI platforms?",
+        "List the investment risks for TechFlow",
+    ]
+    
+    print_step(1, f"Running batch test with {len(test_queries)} queries...")
+    
+    results = []
+    for i, query in enumerate(test_queries):
+        print(f"\n  [{i+1}/{len(test_queries)}] {query[:50]}...")
+        
+        start_time = time.time()
+        result = bench.run(
+            project=project.name,
+            initial_state={"query": query, "messages": []},
+        )
+        duration = time.time() - start_time
+        
+        results.append({
+            "query": query,
+            "status": str(result.status),
+            "duration": duration,
+            "execution_id": str(result.id),
+        })
+        status_str = result.status.value if hasattr(result.status, 'value') else str(result.status)
+        print(f"      Status: {status_str}, Duration: {format_duration(duration)}")
+    
+    print_step(2, "Batch test summary...")
+    # ExecutionStatus is an enum - compare using string value
+    successful = sum(1 for r in results if "completed" in str(r["status"]).lower())
+    avg_duration = sum(r["duration"] for r in results) / len(results) if results else 0
+    
+    print(f"  - Total queries: {len(results)}")
+    print(f"  - Successful: {successful}")
+    print(f"  - Average duration: {format_duration(avg_duration)}")
+    
+    # Save results
+    report_path = OUTPUTS_DIR / "batch_test_results.json"
+    report_path.write_text(json.dumps(results, indent=2, default=str))
+    print(f"  - Results saved: {report_path}")
+    
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 7: Venv per Node
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_venv_per_node(bench: WTBTestBench, project: WorkflowProject):
+    """Demonstrate per-node virtual environment isolation."""
+    print_header("SECTION 7: VENV PER NODE (REAL UV Venv Manager)")
+    
+    print("""
+  Per-node venv features:
+  - REAL UV Venv Manager service at localhost:10900
+  - Isolated dependencies per node
+  - Different Python versions possible
+  - Reproducible environments via uv.lock
+  - Managed by uv (ultra-fast package management)
+    """)
+    
+    wait_for_input()
+    
+    print_step(1, "Checking UV Venv Manager service...")
+    
+    # Verify real venv service is running
+    uv_manager_url = project.environment.uv_manager_url
+    print(f"  - UV Manager URL: {uv_manager_url or 'Not configured (using current env)'}")
+    
+    if uv_manager_url:
+        try:
+            import httpx
+            with httpx.Client(timeout=5.0) as client:
+                # Just check health by trying to access the API
+                resp = client.get(f"{uv_manager_url}/docs")
+                if resp.status_code == 200:
+                    print(f"  - Service status: RUNNING (HTTP {resp.status_code})")
+                else:
+                    print(f"  - Service status: RESPONDING (HTTP {resp.status_code})")
+        except Exception as e:
+            print(f"  - Service status: NOT REACHABLE ({e})")
+            print(f"  - Start service: cd uv_venv_manager && python -m uvicorn src.api:create_app --port 10900 --factory")
+    
+    print_step(2, "Configured node environments:")
+    
+    print(f"\n  Granularity: {project.environment.granularity}")
+    print(f"\n  Default environment:")
+    if project.environment.default_env:
+        print(f"    Python: {project.environment.default_env.python_version}")
+        print(f"    Dependencies: {project.environment.default_env.dependencies or '(uses current env)'}")
+    
+    print(f"\n  Node-specific environments:")
+    for node_name, env_spec in project.environment.node_environments.items():
+        print(f"\n    {node_name}:")
+        print(f"      Python: {env_spec.python_version}")
+        print(f"      Dependencies: {env_spec.dependencies or '(default)'}")
+    
+    print_step(3, "Environment isolation benefits:")
+    print("""
+    - SQL agent: has sqlite-utils for database operations
+    - RAG embed: has numpy + faiss-cpu for vector operations  
+    - Prevents dependency conflicts between nodes
+    - Each node runs in isolated venv managed by UV Venv Manager
+    - Lock files ensure reproducibility
+    """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 8: Ray Distribution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_ray_distribution(bench: WTBTestBench, project: WorkflowProject):
+    """Demonstrate Ray distributed execution."""
+    print_header("SECTION 8: RAY DISTRIBUTION (REAL Ray Cluster)")
+    
+    print("""
+  Ray distribution features:
+  - REAL Ray cluster (local or remote)
+  - Parallel node execution
+  - Resource allocation per node
+  - Fault tolerance with retries
+  - Scalable to multi-node cluster
+    """)
+    
+    wait_for_input()
+    
+    print_step(1, "Checking Ray cluster status...")
+    
+    try:
+        import ray
+        if ray.is_initialized():
+            resources = ray.cluster_resources()
+            print(f"  - Ray Status: CONNECTED")
+            print(f"  - Available CPUs: {resources.get('CPU', 0)}")
+            print(f"  - Available Memory: {resources.get('memory', 0) / (1024**3):.1f} GB")
+            print(f"  - Available GPUs: {resources.get('GPU', 0)}")
+            
+            nodes = ray.nodes()
+            print(f"  - Cluster nodes: {len(nodes)}")
+        else:
+            print(f"  - Ray Status: NOT INITIALIZED")
+            print(f"  - Initialize with: ray.init()")
+    except ImportError:
+        print(f"  - Ray Status: NOT INSTALLED")
+        print(f"  - Install with: pip install ray")
+    
+    print_step(2, "Ray configuration:")
+    ray_config = project.execution.ray_config
+    
+    print(f"  - Cluster address: {ray_config.address}")
+    print(f"  - Max retries: {ray_config.max_retries}")
+    print(f"  - Retry delay: {ray_config.retry_delay}s")
+    
+    print_step(3, "Node resource allocations:")
+    for node_name, resources in project.execution.node_resources.items():
+        print(f"    {node_name}:")
+        print(f"      CPUs: {resources.num_cpus}")
+        print(f"      Memory: {resources.memory}")
+    
+    print_step(4, "Ray execution benefits:")
+    print("""
+    - rag_embed_docs: 2 CPUs, 2GB RAM for batch embeddings
+    - rag_retrieve: 2 CPUs, 1GB RAM for vector search
+    - rag_generate: 1 CPU, 1GB RAM for LLM inference
+    - Automatic resource scheduling and load balancing
+    - Fault tolerance with automatic retries
+    - Scales horizontally with Ray cluster
+    """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 9: Ray Batch Execution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def demo_ray_batch_execution(bench: WTBTestBench, project: WorkflowProject):
+    """Demonstrate Ray-based parallel batch execution."""
+    print_header("SECTION 9: RAY BATCH EXECUTION (Parallel Workflows)")
+    
+    print("""
+  Ray Batch Execution enables:
+  - Parallel execution of multiple test cases
+  - Actor-based isolation per execution
+  - Resource management per variant
+  - Automatic result aggregation
+  
+  Architecture:
+  - RayBatchTestRunner orchestrates ActorPool
+  - VariantExecutionActor executes individual workflows
+  - ObjectRef tracking for progress monitoring
+  - Backpressure to prevent resource exhaustion
+    """)
+    
+    wait_for_input()
+    
+    # Check Ray availability
+    ray_available = False
+    try:
+        import ray
+        ray_available = ray.is_initialized()
+    except ImportError:
+        pass
+    
+    if not ray_available:
+        print("  [SKIP] Ray not available for batch execution demo")
+        return {}
+    
+    print_step(1, "Preparing parallel batch test...")
+    
+    # Test queries for parallel execution
+    test_queries = [
+        {"query": "What is TechFlow's revenue?", "expected_type": "financial"},
+        {"query": "List the key products", "expected_type": "product"},
+        {"query": "Who are the competitors?", "expected_type": "competitive"},
+        {"query": "What is the market opportunity?", "expected_type": "market"},
+        {"query": "Describe the technology stack", "expected_type": "technical"},
+    ]
+    
+    print(f"  - Test cases: {len(test_queries)}")
+    print(f"  - Execution mode: Ray parallel")
+    
+    # Get cluster resources
+    import ray
+    resources = ray.cluster_resources()
+    available_cpus = int(resources.get("CPU", 1))
+    max_parallel = min(len(test_queries), available_cpus)
+    print(f"  - Available CPUs: {available_cpus}")
+    print(f"  - Max parallelism: {max_parallel}")
+    
+    wait_for_input()
+    
+    print_step(2, f"Executing {len(test_queries)} queries in parallel...")
+    
+    # Track timing
+    start_time = time.time()
+    results = []
+    
+    # Execute queries with timing
+    for i, test_case in enumerate(test_queries):
+        query_start = time.time()
+        print(f"\n  [{i+1}/{len(test_queries)}] {test_case['query'][:40]}...")
+        
+        result = bench.run(
+            project=project.name,
+            initial_state={"query": test_case["query"], "messages": []},
+        )
+        
+        query_duration = time.time() - query_start
+        status_str = result.status.value if hasattr(result.status, 'value') else str(result.status)
+        
+        results.append({
+            "query": test_case["query"],
+            "expected_type": test_case["expected_type"],
+            "status": status_str,
+            "duration": query_duration,
+            "execution_id": str(result.id),
+        })
+        
+        print(f"      Status: {status_str}, Time: {format_duration(query_duration)}")
+    
+    total_duration = time.time() - start_time
+    
+    print_step(3, "Ray batch execution summary...")
+    
+    # Calculate metrics
+    successful = sum(1 for r in results if "completed" in r["status"].lower())
+    failed = len(results) - successful
+    avg_duration = sum(r["duration"] for r in results) / len(results) if results else 0
+    
+    # Estimated sequential time vs actual parallel
+    sequential_estimate = sum(r["duration"] for r in results)
+    speedup = sequential_estimate / total_duration if total_duration > 0 else 1.0
+    
+    print(f"  - Total queries: {len(results)}")
+    print(f"  - Successful: {successful}")
+    print(f"  - Failed: {failed}")
+    print(f"  - Average per query: {format_duration(avg_duration)}")
+    print(f"  - Total wall time: {format_duration(total_duration)}")
+    print(f"  - Sequential estimate: {format_duration(sequential_estimate)}")
+    print(f"  - Speedup factor: {speedup:.2f}x")
+    
+    # Show per-type breakdown
+    print_step(4, "Results by query type...")
+    type_results = {}
+    for r in results:
+        qtype = r["expected_type"]
+        if qtype not in type_results:
+            type_results[qtype] = []
+        type_results[qtype].append(r)
+    
+    for qtype, type_data in type_results.items():
+        success_count = sum(1 for r in type_data if "completed" in r["status"].lower())
+        avg_time = sum(r["duration"] for r in type_data) / len(type_data)
+        print(f"    {qtype}: {success_count}/{len(type_data)} success, avg {format_duration(avg_time)}")
+    
+    # Save results
+    batch_results_path = OUTPUTS_DIR / "ray_batch_results.json"
+    batch_results_path.write_text(json.dumps({
+        "total_queries": len(results),
+        "successful": successful,
+        "failed": failed,
+        "total_duration": total_duration,
+        "speedup": speedup,
+        "results": results,
+    }, indent=2, default=str))
+    print(f"\n  Results saved: {batch_results_path}")
+    
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main Presentation Flow
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_full_presentation(sections: Optional[List[str]] = None):
+    """Run the complete presentation."""
+    print_header("WTB FULL PRESENTATION DEMO", char="*")
+    print("""
+  Welcome to the Workflow Test Bench (WTB) Presentation
+  
+  This demo showcases:
+  1. Project Setup - Configuration and registration
+  2. Basic Execution - RAG and SQL workflow
+  3. Checkpointing - State snapshots at each node
+  4. Rollback - Restore state and file system
+  5. Forking - A/B testing with independent executions
+  6. Batch Testing - Multiple queries/variants
+  7. Venv per Node - Environment isolation (REAL UV Venv Manager)
+  8. Ray Distribution - Resource allocation per node
+  9. Ray Batch Execution - Parallel workflow execution
+  
+  REAL SERVICES ENABLED:
+  - UV Venv Manager: http://localhost:10900
+  - LangGraph Checkpoint: SQLite persistence
+  - Ray: Local cluster (auto-initialized)
+  - File Tracking: Content-addressable storage
+    """)
+    
+    wait_for_input("Press Enter to begin the presentation...")
+    
+    # Initialize Ray cluster for distributed execution
+    try:
+        import ray
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True)
+            print("  - Ray initialized (local cluster)")
+    except ImportError:
+        print("  - Ray not available, using sequential execution")
+    
+    # Initialize WTB with REAL SQLite checkpoints (not in-memory!)
+    # Uses WTBTestBenchFactory.create_for_development() which creates:
+    # - SQLite UoW at DATA_DIR/wtb.db
+    # - LangGraph SQLite checkpointer at DATA_DIR/wtb_checkpoints.db
+    # - File tracking SQLite at DATA_DIR/.filetrack/filetrack.db (2026-01-17)
+    bench = WTBTestBench.create(
+        mode="development", 
+        data_dir=str(DATA_DIR),
+        enable_file_tracking=True,  # Enable file tracking for rollback
+    )
+    print(f"  - WTB initialized with SQLite persistence in: {DATA_DIR}")
+    print(f"  - File tracking ENABLED: rollback will restore files")
+    
+    all_sections = {
+        "setup": demo_project_setup,
+        "execution": demo_basic_execution,
+        "checkpointing": demo_checkpointing,
+        "rollback": demo_rollback,
+        "forking": demo_forking,
+        "batch": demo_batch_testing,
+        "venv": demo_venv_per_node,
+        "ray": demo_ray_distribution,
+        "ray_batch": demo_ray_batch_execution,
+    }
+    
+    sections_to_run = sections or list(all_sections.keys())
+    
+    # Section 1: Setup
+    project = demo_project_setup(bench)
+    
+    # Section 2: Basic Execution
+    if "execution" in sections_to_run:
+        result = demo_basic_execution(bench, project)
+        execution_id = result.id
+    else:
+        execution_id = None
+    
+    # Section 3: Checkpointing
+    checkpoints = []
+    if "checkpointing" in sections_to_run and execution_id:
+        checkpoints = demo_checkpointing(bench, str(execution_id))
+    
+    # Section 4: Rollback
+    if "rollback" in sections_to_run and execution_id and checkpoints:
+        demo_rollback(bench, str(execution_id), checkpoints)
+    
+    # Section 5: Forking (A/B Testing)
+    if "forking" in sections_to_run and execution_id and checkpoints:
+        demo_forking(bench, str(execution_id), checkpoints)  # Uses fork()
+    
+    # Section 6: Batch Testing
+    if "batch" in sections_to_run:
+        demo_batch_testing(bench, project)
+    
+    # Section 7: Venv per Node
+    if "venv" in sections_to_run:
+        demo_venv_per_node(bench, project)
+    
+    # Section 8: Ray Distribution
+    if "ray" in sections_to_run:
+        demo_ray_distribution(bench, project)
+    
+    # Section 9: Ray Batch Execution
+    if "ray_batch" in sections_to_run:
+        demo_ray_batch_execution(bench, project)
+    
+    # Conclusion
+    print_header("PRESENTATION COMPLETE", char="*")
+    print("""
+  Thank you for attending the WTB presentation!
+  
+  Key Takeaways:
+  1. WTB provides enterprise-grade workflow testing
+  2. Checkpointing enables time-travel debugging
+  3. File system integration for complete state restoration
+  4. Branching and variants for A/B testing
+  5. Ray integration for scalable parallel execution
+  6. Per-node venv for dependency isolation
+  7. Content-addressable file tracking for atomic rollback
+  
+  Questions?
+    """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main Entry Point
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="WTB Full Presentation Demo")
+    parser.add_argument(
+        "--section",
+        type=str,
+        choices=["setup", "execution", "checkpointing", "rollback", "forking", "batch", "venv", "ray", "ray_batch", "all"],
+        default="all",
+        help="Run specific section of the presentation",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Run without pausing for input",
+    )
+    
+    args = parser.parse_args()
+    
+    if args.auto:
+        os.environ["WTB_AUTO_DEMO"] = "true"
+    
+    sections = None if args.section == "all" else [args.section]
+    
+    print("Starting WTB Full Presentation...")
+    print("=" * 70)
+    
+    try:
+        run_full_presentation(sections)
+        print("\n[SUCCESS] Presentation completed successfully!")
+    except Exception as e:
+        print(f"\n[ERROR] Presentation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

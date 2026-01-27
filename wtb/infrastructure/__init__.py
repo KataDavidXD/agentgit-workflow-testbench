@@ -8,6 +8,17 @@ handling all technical concerns like database access and external integrations.
 from .database.unit_of_work import SQLAlchemyUnitOfWork
 from .adapters.inmemory_state_adapter import InMemoryStateAdapter
 
+# Checkpoint Stores (DDD - 2026-01-15)
+from .stores.inmemory_checkpoint_store import (
+    InMemoryCheckpointStore,
+    InMemoryCheckpointStoreFactory,
+)
+from .stores.langgraph_checkpoint_store import (
+    LangGraphCheckpointStore,
+    LangGraphCheckpointConfig,
+    LangGraphCheckpointStoreFactory,
+)
+
 # Event Bus and Audit Trail
 from .events.wtb_event_bus import (
     WTBEventBus,
@@ -32,8 +43,14 @@ from .environment.providers import (
 __all__ = [
     # Database
     "SQLAlchemyUnitOfWork",
-    # Adapters
+    # Adapters (Legacy)
     "InMemoryStateAdapter",
+    # Checkpoint Stores (DDD - 2026-01-15)
+    "InMemoryCheckpointStore",
+    "InMemoryCheckpointStoreFactory",
+    "LangGraphCheckpointStore",
+    "LangGraphCheckpointConfig",
+    "LangGraphCheckpointStoreFactory",
     # Event Bus
     "WTBEventBus",
     "get_wtb_event_bus",

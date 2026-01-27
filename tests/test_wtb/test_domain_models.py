@@ -403,37 +403,45 @@ class TestExecution:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestNodeBoundary:
-    """Tests for NodeBoundary entity."""
+    """Tests for NodeBoundary entity (Updated 2026-01-15 for DDD compliance)."""
     
     def test_create_boundary(self):
         """Test creating a node boundary."""
         boundary = NodeBoundary(
             execution_id="exec1",
-            internal_session_id=1,
             node_id="node1",
-            entry_checkpoint_id=5
         )
         
         assert boundary.node_id == "node1"
-        assert boundary.entry_checkpoint_id == 5
-        assert boundary.node_status == "started"
+        assert boundary.entry_checkpoint_id is None
+        assert boundary.node_status == "pending"
         assert boundary.exit_checkpoint_id is None
+    
+    def test_start_boundary(self):
+        """Test starting a node boundary."""
+        boundary = NodeBoundary(
+            execution_id="exec1",
+            node_id="node1",
+        )
+        
+        boundary.start(entry_checkpoint_id="cp-005")
+        
+        assert boundary.node_status == "running"
+        assert boundary.entry_checkpoint_id == "cp-005"
+        assert boundary.started_at is not None
     
     def test_complete_boundary(self):
         """Test completing a node boundary."""
         boundary = NodeBoundary(
             execution_id="exec1",
-            internal_session_id=1,
             node_id="node1",
-            entry_checkpoint_id=5
         )
         
-        boundary.complete(exit_checkpoint_id=10, tool_count=3, checkpoint_count=2)
+        boundary.start(entry_checkpoint_id="cp-005")
+        boundary.complete(exit_checkpoint_id="cp-010")
         
         assert boundary.node_status == "completed"
-        assert boundary.exit_checkpoint_id == 10
-        assert boundary.tool_count == 3
-        assert boundary.checkpoint_count == 2
+        assert boundary.exit_checkpoint_id == "cp-010"
         assert boundary.completed_at is not None
         assert boundary.duration_ms is not None
     
@@ -441,11 +449,10 @@ class TestNodeBoundary:
         """Test failing a node boundary."""
         boundary = NodeBoundary(
             execution_id="exec1",
-            internal_session_id=1,
             node_id="node1",
-            entry_checkpoint_id=5
         )
         
+        boundary.start(entry_checkpoint_id="cp-005")
         boundary.fail("Error occurred", {"detail": "more info"})
         
         assert boundary.node_status == "failed"
@@ -456,32 +463,45 @@ class TestNodeBoundary:
         """Test rollback target eligibility."""
         boundary = NodeBoundary(
             execution_id="exec1",
-            internal_session_id=1,
             node_id="node1",
-            entry_checkpoint_id=5
         )
         
+        # Pending boundary is not a rollback target
         assert not boundary.is_rollback_target()
         
-        boundary.complete(exit_checkpoint_id=10)
+        boundary.start(entry_checkpoint_id="cp-005")
         
+        # Running boundary is not a rollback target
+        assert not boundary.is_rollback_target()
+        
+        boundary.complete(exit_checkpoint_id="cp-010")
+        
+        # Completed boundary is a rollback target
         assert boundary.is_rollback_target()
     
     def test_to_dict_and_from_dict(self):
         """Test serialization."""
         boundary = NodeBoundary(
             execution_id="exec1",
-            internal_session_id=1,
             node_id="node1",
-            entry_checkpoint_id=5
         )
-        boundary.complete(exit_checkpoint_id=10)
+        boundary.start(entry_checkpoint_id="cp-005")
+        boundary.complete(exit_checkpoint_id="cp-010")
         
         data = boundary.to_dict()
         restored = NodeBoundary.from_dict(data)
         
         assert restored.node_id == boundary.node_id
-        assert restored.exit_checkpoint_id == 10
+        assert restored.exit_checkpoint_id == "cp-010"
+        assert restored.entry_checkpoint_id == "cp-005"
+    
+    def test_create_for_node_factory(self):
+        """Test factory method."""
+        boundary = NodeBoundary.create_for_node("exec1", "node1")
+        
+        assert boundary.execution_id == "exec1"
+        assert boundary.node_id == "node1"
+        assert boundary.node_status == "pending"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

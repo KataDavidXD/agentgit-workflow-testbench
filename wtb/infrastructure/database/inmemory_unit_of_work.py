@@ -22,20 +22,20 @@ from wtb.domain.interfaces.repositories import (
     IBatchTestRepository,
     IEvaluationResultRepository,
     INodeBoundaryRepository,
-    ICheckpointFileRepository,
     IOutboxRepository,
     IAuditLogRepository,
 )
+from wtb.domain.interfaces.file_processing_repository import ICheckpointFileLinkRepository
 from wtb.domain.models import (
     TestWorkflow,
     Execution,
     ExecutionStatus,
     NodeVariant,
     NodeBoundary,
-    CheckpointFile,
     OutboxEvent,
     OutboxStatus,
 )
+from wtb.domain.models.file_processing import CheckpointFileLink, CommitId
 from wtb.domain.models.batch_test import BatchTest, BatchTestStatus
 from wtb.domain.models.evaluation import EvaluationResult
 from wtb.infrastructure.events.wtb_audit_trail import WTBAuditEntry
@@ -90,6 +90,10 @@ class InMemoryWorkflowRepository(IWorkflowRepository):
             if w.name == name and w.version == version:
                 return deepcopy(w)
         return None
+    
+    def list_all(self) -> List[TestWorkflow]:
+        """List all workflows without pagination."""
+        return [deepcopy(w) for w in self._store.values()]
 
 
 class InMemoryExecutionRepository(IExecutionRepository):
@@ -268,7 +272,12 @@ class InMemoryEvaluationResultRepository(IEvaluationResultRepository):
 
 
 class InMemoryNodeBoundaryRepository(INodeBoundaryRepository):
-    """In-memory node boundary repository."""
+    """
+    In-memory node boundary repository.
+    
+    Updated 2026-01-15 for DDD compliance:
+    - Changed from internal_session_id to execution_id
+    """
     
     def __init__(self):
         self._store: Dict[int, NodeBoundary] = {}
@@ -304,68 +313,77 @@ class InMemoryNodeBoundaryRepository(INodeBoundaryRepository):
             return True
         return False
     
-    def find_by_session(self, internal_session_id: int) -> List[NodeBoundary]:
+    # New DDD-compliant methods (2026-01-15)
+    def find_by_execution(self, execution_id: str) -> List[NodeBoundary]:
+        """Find all boundaries for an execution."""
         return [deepcopy(b) for b in self._store.values() 
-                if b.internal_session_id == internal_session_id]
+                if b.execution_id == execution_id]
     
-    def find_by_node(self, internal_session_id: int, node_id: str) -> Optional[NodeBoundary]:
+    def find_by_execution_and_node(self, execution_id: str, node_id: str) -> Optional[NodeBoundary]:
+        """Find boundary for a specific node in an execution."""
         for b in self._store.values():
-            if b.internal_session_id == internal_session_id and b.node_id == node_id:
+            if b.execution_id == execution_id and b.node_id == node_id:
                 return deepcopy(b)
         return None
     
-    def find_completed(self, internal_session_id: int) -> List[NodeBoundary]:
+    def find_completed_by_execution(self, execution_id: str) -> List[NodeBoundary]:
+        """Find completed boundaries for an execution."""
         return [deepcopy(b) for b in self._store.values()
-                if b.internal_session_id == internal_session_id 
+                if b.execution_id == execution_id 
                 and b.node_status == 'completed']
+    
+    # Legacy methods REMOVED (2026-01-27):
+    # - find_by_session() → Use find_by_execution()
+    # - find_by_node() → Use find_by_execution_and_node()
+    # - find_completed() → Use find_completed_by_execution()
 
 
-class InMemoryCheckpointFileRepository(ICheckpointFileRepository):
-    """In-memory checkpoint file repository."""
+class InMemoryCheckpointFileLinkRepository(ICheckpointFileLinkRepository):
+    """In-memory checkpoint file link repository (2026-01-27 consolidated)."""
     
     def __init__(self):
-        self._store: Dict[int, CheckpointFile] = {}
-        self._next_id: int = 1
+        self._store: Dict[int, CheckpointFileLink] = {}
     
-    def get(self, id: str) -> Optional[CheckpointFile]:
-        cf = self._store.get(int(id))
-        return deepcopy(cf) if cf else None
+    def add(self, link: CheckpointFileLink) -> None:
+        """Add a checkpoint-file link (upsert behavior)."""
+        self._store[link.checkpoint_id] = deepcopy(link)
     
-    def list(self, limit: int = 100, offset: int = 0) -> List[CheckpointFile]:
-        files = list(self._store.values())[offset:offset + limit]
-        return [deepcopy(f) for f in files]
+    def get_by_checkpoint(self, checkpoint_id: int) -> Optional[CheckpointFileLink]:
+        """Get link by checkpoint ID."""
+        link = self._store.get(checkpoint_id)
+        return deepcopy(link) if link else None
     
-    def exists(self, id: str) -> bool:
-        return int(id) in self._store
+    def get_by_commit(self, commit_id: CommitId) -> List[CheckpointFileLink]:
+        """Get all links for a commit."""
+        return [deepcopy(link) for link in self._store.values() 
+                if link.commit_id.value == commit_id.value]
     
-    def add(self, entity: CheckpointFile) -> CheckpointFile:
-        entity.id = self._next_id
-        self._next_id += 1
-        self._store[entity.id] = deepcopy(entity)
-        return entity
-    
-    def update(self, entity: CheckpointFile) -> CheckpointFile:
-        if entity.id not in self._store:
-            raise ValueError(f"CheckpointFile {entity.id} not found")
-        self._store[entity.id] = deepcopy(entity)
-        return entity
-    
-    def delete(self, id: str) -> bool:
-        int_id = int(id)
-        if int_id in self._store:
-            del self._store[int_id]
+    def delete_by_checkpoint(self, checkpoint_id: int) -> bool:
+        """Delete link by checkpoint ID."""
+        if checkpoint_id in self._store:
+            del self._store[checkpoint_id]
             return True
         return False
     
-    def find_by_checkpoint(self, checkpoint_id: int) -> Optional[CheckpointFile]:
-        for cf in self._store.values():
-            if cf.checkpoint_id == checkpoint_id:
-                return deepcopy(cf)
-        return None
+    def list_all(self, limit: int = 10000) -> List[CheckpointFileLink]:
+        """List all checkpoint file links."""
+        links = list(self._store.values())
+        return [deepcopy(link) for link in links[:limit]]
     
-    def find_by_file_commit(self, file_commit_id: str) -> List[CheckpointFile]:
-        return [deepcopy(cf) for cf in self._store.values() 
-                if cf.file_commit_id == file_commit_id]
+    def delete_by_commit(self, commit_id: CommitId) -> int:
+        """Delete all links for a commit."""
+        to_delete = [
+            cp_id for cp_id, link in self._store.items()
+            if link.commit_id.value == commit_id.value
+        ]
+        for cp_id in to_delete:
+            del self._store[cp_id]
+        return len(to_delete)
+    
+    def list_all(self, limit: int = 100) -> List[CheckpointFileLink]:
+        """List all links (extension method, not in interface)."""
+        links = list(self._store.values())
+        return [deepcopy(link) for link in links[:limit]]
 
 
 class InMemoryOutboxRepository(IOutboxRepository):
@@ -506,7 +524,7 @@ class InMemoryUnitOfWork(IUnitOfWork):
         self.batch_tests: IBatchTestRepository = InMemoryBatchTestRepository()
         self.evaluation_results: IEvaluationResultRepository = InMemoryEvaluationResultRepository()
         self.node_boundaries: INodeBoundaryRepository = InMemoryNodeBoundaryRepository()
-        self.checkpoint_files: ICheckpointFileRepository = InMemoryCheckpointFileRepository()
+        self.checkpoint_file_links: ICheckpointFileLinkRepository = InMemoryCheckpointFileLinkRepository()
         self.outbox: IOutboxRepository = InMemoryOutboxRepository()
         self.audit_logs: IAuditLogRepository = InMemoryAuditLogRepository()
         
@@ -536,7 +554,7 @@ class InMemoryUnitOfWork(IUnitOfWork):
         self.batch_tests = InMemoryBatchTestRepository()
         self.evaluation_results = InMemoryEvaluationResultRepository()
         self.node_boundaries = InMemoryNodeBoundaryRepository()
-        self.checkpoint_files = InMemoryCheckpointFileRepository()
+        self.checkpoint_file_links = InMemoryCheckpointFileLinkRepository()
         self.outbox = InMemoryOutboxRepository()
         self.audit_logs = InMemoryAuditLogRepository()
 

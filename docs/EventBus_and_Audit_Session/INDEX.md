@@ -1,82 +1,111 @@
-# Event Bus & Audit Session Documentation
+# Event Bus & Audit Session
 
-## Overview
+**Last Updated:** 2026-01-27  
+**Parent:** [Project_Init/INDEX.md](../Project_Init/INDEX.md)
 
-本目录包含 WTB 与 AgentGit 的 Event Bus 和 Audit Trail 集成设计文档。
+---
 
-## Documents
+## 1. Structure
 
-| Document | Purpose | Status |
-|----------|---------|--------|
-| [WTB_EVENTBUS_AUDIT_DESIGN.md](./WTB_EVENTBUS_AUDIT_DESIGN.md) | 完整设计文档：AgentGit分析 + WTB集成方案 | ✅ Complete |
-
-## Quick Navigation
-
-### AgentGit 分析
-
-- [§1. AgentGit Event Bus 分析](./WTB_EVENTBUS_AUDIT_DESIGN.md#1-agentgit-event-bus-分析) - 架构、设计特点、源码分析
-- [§2. AgentGit Audit Trail 分析](./WTB_EVENTBUS_AUDIT_DESIGN.md#2-agentgit-audit-trail-分析) - AuditEvent、AuditTrail、LangChain集成
-
-### WTB 设计
-
-- [§4. WTB Event Bus & Audit 设计方案](./WTB_EVENTBUS_AUDIT_DESIGN.md#4-wtb-event-bus--audit-设计方案) - 架构总览、边界划分
-- [§5. 实现设计](./WTB_EVENTBUS_AUDIT_DESIGN.md#5-实现设计) - WTBEventBus、WTBAuditTrail、AuditEventListener 代码
-- [§6. 使用示例](./WTB_EVENTBUS_AUDIT_DESIGN.md#6-使用示例) - 基本使用、AgentGit集成
-
-### 实施
-
-- [§7. 实施计划](./WTB_EVENTBUS_AUDIT_DESIGN.md#7-实施计划) - 三阶段计划
-- [§8. 测试策略](./WTB_EVENTBUS_AUDIT_DESIGN.md#8-测试策略) - 单元测试、集成测试
-
-## Key Design Decisions
-
-| 决策点 | 选择 | 理由 |
-|--------|------|------|
-| **Event Bus 复用** | 复用 AgentGit EventBus + WTB 包装 | 避免重复造轮子 |
-| **Audit Trail 独立** | WTB 维护独立 Audit，可导入 AgentGit Audit | 关注点不同 |
-| **事件桥接** | 通过 ACL 适配器 | 保持边界清晰 |
-| **线程安全** | WTBEventBus 加锁 | 支持并行执行 |
-
-## Architecture Summary
+### 1.1 Event Bus (`wtb/infrastructure/events/`)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Event Flow                                    │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   ExecutionController ──► WTBEventBus ──► AuditEventListener    │
-│          │                    │                   │              │
-│          │                    │                   ▼              │
-│          │                    │           WTBAuditTrail          │
-│          │                    │                                  │
-│          │              AgentGit Bridge                          │
-│          │                    │                                  │
-│          ▼                    ▼                                  │
-│   AgentGitStateAdapter ◄── AgentGit EventBus                    │
-│          │                                                       │
-│          ▼                                                       │
-│   AgentGit AuditTrail (stored in checkpoint.metadata)           │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+wtb/infrastructure/events/
+├── __init__.py
+├── wtb_event_bus.py             # Thread-safe pub/sub (RLock)
+└── wtb_audit_trail.py           # Audit entry recording
 ```
 
-## File Structure (Planned)
+### 1.2 Domain Events (`wtb/domain/events/`)
 
 ```
-wtb/
-├── domain/
-│   ├── events/           # 现有 WTB Events
-│   └── audit/            # 新增
-│       └── audit_trail.py
-│
-├── infrastructure/
-│   └── events/           # 新增
-│       ├── event_bus.py
-│       └── audit_listener.py
+wtb/domain/events/
+├── __init__.py                  # 70+ event exports
+├── execution_events.py          # Started, Paused, Completed, Failed
+├── node_events.py               # NodeStarted, NodeCompleted, NodeFailed
+├── checkpoint_events.py         # CheckpointCreated, Rollback, Branch
+├── langgraph_events.py          # LangGraph audit events
+├── file_processing_events.py    # FileCommit, FileRestore events
+├── ray_events.py                # Ray batch/actor events (17 types)
+├── environment_events.py        # Venv lifecycle events (13 types)
+└── workspace_events.py          # Workspace isolation events (17 types)
 ```
 
-## Related Documents
+### 1.3 Architecture
 
-- [../Project_Init/WORKFLOW_TEST_BENCH_ARCHITECTURE.md](../Project_Init/WORKFLOW_TEST_BENCH_ARCHITECTURE.md) - WTB 总体架构
-- [../Adapter_and_WTB-Storage/ARCHITECTURE_FIX_DESIGN.md](../Adapter_and_WTB-Storage/ARCHITECTURE_FIX_DESIGN.md) - Outbox Pattern, IntegrityChecker
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           EVENT FLOW                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ExecutionController ──────► WTBEventBus ──────► AuditEventListener        │
+│          │                        │                      │                   │
+│          │                   (RLock)                (auto-record)            │
+│          │                        │                      ▼                   │
+│          │                        │              WTBAuditTrail               │
+│          │                        │                      │                   │
+│          │                   Bridge (optional)       flush()                 │
+│          │                        │                      │                   │
+│          ▼                        ▼                      ▼                   │
+│   LangGraphStateAdapter     AgentGit (if enabled)  IAuditLogRepository      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
+### 1.4 Key Features
+
+| Feature | Implementation | Notes |
+|---------|---------------|-------|
+| Thread Safety | `RLock` (reentrant) | Supports nested publishes |
+| Bounded History | `deque(maxlen=1000)` | O(1) operations |
+| AgentGit Bridge | Optional via `enable_agentgit_bridge()` | Avoids import cycles |
+| Event Persistence | `IAuditLogRepository` | SQLAlchemy or InMemory |
+
+---
+
+## 2. Issues
+
+### 2.1 Active Issues
+
+| ID | Issue | Priority | Status |
+|----|-------|----------|--------|
+| EVT-001 | AgentGit bridge memory leak risk | P2 | Open |
+| EVT-002 | Event history unbounded without max_history | P3 | Resolved |
+
+### 2.2 EVT-001: Bridge Handler Leak
+
+**Problem:** Repeated `enable_agentgit_bridge()` / `disable_agentgit_bridge()` without proper cleanup could accumulate handlers.
+
+**Mitigation:** Always call `disable_agentgit_bridge()` before re-enabling.
+
+**Suggested Fix:** Consider weak references for bridge handlers.
+
+---
+
+## 3. Gap Analysis (Brief)
+
+| Design Intent | Implementation | Gap |
+|--------------|----------------|-----|
+| Thread-safe event bus | ✅ `WTBEventBus` with RLock | None |
+| Bounded history | ✅ `deque(maxlen=1000)` | None |
+| Audit persistence | ✅ `IAuditLogRepository` | None |
+| AgentGit bridge | ✅ Optional, explicit enable | None (design deviation documented) |
+| Rich domain events | ✅ 70+ event types | Exceeds design |
+
+**Design Deviations (Intentional):**
+
+| Design | Implementation | Reason |
+|--------|---------------|--------|
+| Wrap AgentGit EventBus | Standalone WTBEventBus | Avoid import cycles |
+| `Lock` for thread safety | `RLock` (reentrant) | Support nested publishes |
+| List for history | `deque` | O(1) append and eviction |
+
+---
+
+## 4. Related Documents
+
+| Document | Description |
+|----------|-------------|
+| [../Project_Init/INDEX.md](../Project_Init/INDEX.md) | Main documentation |
+| [../Project_Init/ARCHITECTURE_STRUCTURE.md](../Project_Init/ARCHITECTURE_STRUCTURE.md) | Full architecture |
+| [../LangGraph/INDEX.md](../LangGraph/INDEX.md) | LangGraph events |

@@ -6,7 +6,10 @@ Follows Interface Segregation Principle (ISP) by providing focused methods.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass  # For future type hints like CompiledStateGraph
 
 from ..models.workflow import Execution, ExecutionState, TestWorkflow
 
@@ -48,7 +51,7 @@ class IExecutionController(ABC):
         pass
     
     @abstractmethod
-    def run(self, execution_id: str) -> Execution:
+    def run(self, execution_id: str, graph: Any = None) -> Execution:
         """
         Start or continue execution.
         
@@ -57,8 +60,13 @@ class IExecutionController(ABC):
         - The workflow completes
         - An error occurs
         
+        Execution Strategy:
+        - If graph is provided AND adapter supports LangGraph -> native LangGraph execution
+        - Otherwise -> use DefaultNodeExecutor with WTB workflow nodes
+        
         Args:
             execution_id: ID of the execution to run
+            graph: Optional compiled LangGraph for native execution
             
         Returns:
             Updated Execution with current state

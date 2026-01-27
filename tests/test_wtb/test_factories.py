@@ -26,8 +26,9 @@ from wtb.domain.models import (
     Execution,
     ExecutionStatus,
     NodeBoundary,
-    CheckpointFile,
+    CheckpointFileLink,
 )
+from wtb.domain.models.file_processing import CommitId
 
 
 class TestWTBConfig:
@@ -196,60 +197,57 @@ class TestInMemoryUnitOfWork:
             assert len(by_status) == 1
     
     def test_node_boundary_repository(self):
-        """Test node boundary repository operations."""
+        """Test node boundary repository operations (Updated 2026-01-15 for DDD compliance)."""
         uow = InMemoryUnitOfWork()
         with uow:
-            # Create boundary
-            boundary = NodeBoundary(
+            # Create boundary using factory method
+            boundary = NodeBoundary.create_for_node(
                 execution_id="exec-1",
-                internal_session_id=1,
                 node_id="node-1",
-                entry_checkpoint_id=10,
             )
+            boundary.start(entry_checkpoint_id="cp-010")
             
             # Add (assigns ID)
             saved = uow.node_boundaries.add(boundary)
             assert saved.id is not None
             
-            # Find by session
-            by_session = uow.node_boundaries.find_by_session(1)
-            assert len(by_session) == 1
+            # Find by execution
+            by_execution = uow.node_boundaries.find_by_execution("exec-1")
+            assert len(by_execution) == 1
             
             # Find by node
-            by_node = uow.node_boundaries.find_by_node(1, "node-1")
+            by_node = uow.node_boundaries.find_by_execution_and_node("exec-1", "node-1")
             assert by_node is not None
             
             # Complete and find completed
-            by_node.exit_checkpoint_id = 20
-            by_node.node_status = "completed"
+            by_node.complete(exit_checkpoint_id="cp-020")
             uow.node_boundaries.update(by_node)
             
-            completed = uow.node_boundaries.find_completed(1)
+            completed = uow.node_boundaries.find_completed_by_execution("exec-1")
             assert len(completed) == 1
     
-    def test_checkpoint_file_repository(self):
-        """Test checkpoint file repository operations."""
+    def test_checkpoint_file_link_repository(self):
+        """Test checkpoint file link repository operations."""
         uow = InMemoryUnitOfWork()
         with uow:
             # Create checkpoint file link
-            cf = CheckpointFile(
+            cf = CheckpointFileLink.create_from_values(
                 checkpoint_id=100,
-                file_commit_id="commit-abc",
+                commit_id=CommitId.generate(),
                 file_count=5,
                 total_size_bytes=1024,
             )
             
-            # Add
-            saved = uow.checkpoint_files.add(cf)
-            assert saved.id is not None
+            # Save (v1.6: using add, returns None)
+            uow.checkpoint_file_links.add(cf)
             
-            # Find by checkpoint
-            by_cp = uow.checkpoint_files.find_by_checkpoint(100)
+            # Find by checkpoint (v1.6: using get_by_checkpoint)
+            by_cp = uow.checkpoint_file_links.get_by_checkpoint(100)
             assert by_cp is not None
-            assert by_cp.file_commit_id == "commit-abc"
+            assert by_cp.commit_id.value == cf.commit_id.value
             
-            # Find by file commit
-            by_commit = uow.checkpoint_files.find_by_file_commit("commit-abc")
+            # Find by commit
+            by_commit = uow.checkpoint_file_links.get_by_commit(cf.commit_id)
             assert len(by_commit) == 1
     
     def test_reset(self):
@@ -346,41 +344,41 @@ class TestSQLAlchemyPersistence:
             assert retrieved.status == ExecutionStatus.RUNNING
     
     def test_node_boundary_persistence(self, sqlalchemy_uow):
-        """Test node boundary persistence to database."""
+        """Test node boundary persistence to database (Updated 2026-01-15 for DDD compliance)."""
         with sqlalchemy_uow as uow:
-            boundary = NodeBoundary(
+            boundary = NodeBoundary.create_for_node(
                 execution_id="exec-test",
-                internal_session_id=123,
                 node_id="process_node",
-                entry_checkpoint_id=100,
             )
+            boundary.start(entry_checkpoint_id="cp-100")
             saved = uow.node_boundaries.add(boundary)
             uow.commit()
             
-            # Query by session
-            boundaries = uow.node_boundaries.find_by_session(123)
+            # Query by execution
+            boundaries = uow.node_boundaries.find_by_execution("exec-test")
             assert len(boundaries) == 1
             assert boundaries[0].node_id == "process_node"
     
-    def test_checkpoint_file_persistence(self, sqlalchemy_uow):
+    def test_checkpoint_file_link_persistence(self, sqlalchemy_uow):
         """Test checkpoint-file link persistence (bridges WTB-FileTracker)."""
         with sqlalchemy_uow as uow:
-            cf = CheckpointFile(
+            cf = CheckpointFileLink.create_from_values(
                 checkpoint_id=42,
-                file_commit_id="ft-commit-uuid-123",
+                commit_id=CommitId.generate(),
                 file_count=3,
                 total_size_bytes=4096,
             )
-            uow.checkpoint_files.add(cf)
+            # v1.6: using add instead of save
+            uow.checkpoint_file_links.add(cf)
             uow.commit()
             
-            # Query by checkpoint
-            link = uow.checkpoint_files.find_by_checkpoint(42)
+            # Query by checkpoint (v1.6: using get_by_checkpoint)
+            link = uow.checkpoint_file_links.get_by_checkpoint(42)
             assert link is not None
-            assert link.file_commit_id == "ft-commit-uuid-123"
+            assert link.commit_id.value == cf.commit_id.value
             
-            # Query by file commit
-            links = uow.checkpoint_files.find_by_file_commit("ft-commit-uuid-123")
+            # Query by commit
+            links = uow.checkpoint_file_links.get_by_commit(cf.commit_id)
             assert len(links) == 1
     
     def test_transaction_rollback(self, sqlalchemy_uow):

@@ -1,61 +1,120 @@
-# Adapter & WTB Storage - Documentation Index
+# Adapter & WTB Storage
 
-**Implementation Status: ✅ COMPLETE** (2024-12-23)
+**Last Updated:** 2026-01-27  
+**Parent:** [Project_Init/INDEX.md](../Project_Init/INDEX.md)
 
-## Documents in This Folder
+---
 
-| Document | Purpose | Status |
-|----------|---------|--------|
-| [AGENTGIT_STATE_ADAPTER_DESIGN.md](./AGENTGIT_STATE_ADAPTER_DESIGN.md) | AgentGit state adapter - bridges WTB ↔ AgentGit | ✅ Implemented |
-| [WTB_PERSISTENCE_DESIGN.md](./WTB_PERSISTENCE_DESIGN.md) | WTB storage abstraction (InMemory + SQLAlchemy) | ✅ Implemented |
-| [ARCHITECTURE_FIX_DESIGN.md](./ARCHITECTURE_FIX_DESIGN.md) | **架构修复设计** - Outbox Pattern, IntegrityChecker, 充血模型 | 📋 Designed |
+## 1. Structure
 
-## Key Concepts
+### 1.1 State Adapters (`wtb/infrastructure/adapters/`)
 
-### State Adapter (IStateAdapter)
-- **InMemoryStateAdapter**: For unit tests, no persistence
-- **AgentGitStateAdapter**: Production, uses real AgentGit checkpoints
+```
+wtb/infrastructure/adapters/
+├── __init__.py
+├── langgraph_state_adapter.py   # PRIMARY - LangGraph checkpointers
+├── inmemory_state_adapter.py    # Testing - Dict-based storage
+└── agentgit_state_adapter.py    # DEPRECATED - AgentGit integration
+```
 
-### WTB Persistence (IUnitOfWork)
-- **InMemoryUnitOfWork**: For unit tests, Dict-based storage
-- **SQLAlchemyUnitOfWork**: Production, SQLite or PostgreSQL
+### 1.2 Adapter Hierarchy
 
-## Selection
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        STATE ADAPTER IMPLEMENTATIONS                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   IStateAdapter (Interface)                                                  │
+│   ├── LangGraphStateAdapter     ◄── PRIMARY (production)                    │
+│   │   ├── MemorySaver           (unit tests)                                │
+│   │   ├── SqliteSaver           (development)                               │
+│   │   └── PostgresSaver         (production)                                │
+│   │                                                                          │
+│   ├── InMemoryStateAdapter      ◄── Testing only                            │
+│   │                                                                          │
+│   └── AgentGitStateAdapter      ◄── DEPRECATED                              │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
+### 1.3 WTB Persistence (`wtb/infrastructure/database/`)
+
+```
+wtb/infrastructure/database/
+├── unit_of_work.py              # SQLAlchemyUnitOfWork (ACID)
+├── inmemory_unit_of_work.py     # InMemoryUnitOfWork (testing)
+├── models.py                     # SQLAlchemy ORM models
+├── repositories/                 # Repository implementations
+│   ├── workflow_repository.py
+│   ├── execution_repository.py
+│   ├── outbox_repository.py     # Outbox Pattern
+│   └── ...
+└── migrations/                   # SQL migrations
+```
+
+### 1.4 Key Components
+
+| Component | Purpose | SOLID |
+|-----------|---------|-------|
+| `LangGraphStateAdapter` | Checkpoint persistence via LangGraph | DIP ✅ |
+| `SQLAlchemyUnitOfWork` | Transaction boundaries | SRP ✅ |
+| `OutboxRepository` | Cross-DB consistency | SRP ✅ |
+| `LangGraphConfig` | Checkpointer configuration | OCP ✅ |
+
+---
+
+## 2. Issues
+
+### 2.1 Active Issues
+
+| ID | Issue | Priority | Status |
+|----|-------|----------|--------|
+| ADP-001 | IStateAdapter returns `int`, domain uses `str` | P0 | In Progress |
+| ADP-002 | Checkpoint ID mapping memory overhead | P2 | Open |
+| ADP-003 | AgentGit adapter deprecation cleanup | P3 | Backlog |
+
+### 2.2 ADP-001: ID Type Mismatch
+
+**Problem:** `IStateAdapter.save_checkpoint()` returns `int`, but LangGraph uses UUID strings.
+
+**Current Workaround:**
 ```python
-# Testing
-state_adapter = InMemoryStateAdapter()
-uow = UnitOfWorkFactory.create(mode="inmemory")
-
-# Production
-state_adapter = AgentGitStateAdapter(agentgit_db_path="data/agentgit.db")
-uow = UnitOfWorkFactory.create(mode="sqlalchemy", db_url="sqlite:///data/wtb.db")
+# LangGraphStateAdapter maintains mapping
+self._checkpoint_id_map: Dict[str, int] = {}  # UUID → numeric
+self._numeric_to_lg_id: Dict[int, str] = {}   # numeric → UUID
 ```
 
-## Architecture Fixes (NEW)
+**Resolution:** Migrate to `ICheckpointStore` which uses `CheckpointId(str)`.
 
-基于架构审查发现的关键问题，设计了以下修复方案：
+### 2.3 ADP-002: Memory Overhead
 
-| 优先级 | 问题 | 解决方案 | 文档 |
-|--------|------|----------|------|
-| **P0** | 跨库事务一致性 | Outbox Pattern | [ARCHITECTURE_FIX_DESIGN.md](./ARCHITECTURE_FIX_DESIGN.md#2-p0-outbox-pattern-实现设计) |
-| **P0** | 数据完整性 | IntegrityChecker | [ARCHITECTURE_FIX_DESIGN.md](./ARCHITECTURE_FIX_DESIGN.md#3-p0-integritychecker-设计) |
-| **P1** | 领域模型贫血 | Rich Domain Model | [ARCHITECTURE_FIX_DESIGN.md](./ARCHITECTURE_FIX_DESIGN.md#4-p1-充血领域模型设计) |
+**Problem:** ID mapping dictionaries grow unbounded.
 
-### Outbox Pattern 概述
+**Impact:** Long-running executions may accumulate memory.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  业务数据 + Outbox 事件 ────────► 同一事务写入 WTB DB                │
-│                                        │                            │
-│                                   Outbox Processor (后台)           │
-│                                        │                            │
-│                                        ▼                            │
-│                                   AgentGit DB                       │
-│                                   (验证/同步)                        │
-└─────────────────────────────────────────────────────────────────────┘
-```
+**Suggested Fix:** LRU cache or database persistence for ID mapping.
 
-## See Also
-- [../Project_Init/INDEX.md](../Project_Init/INDEX.md) - Main documentation index
+---
 
+## 3. Gap Analysis (Brief)
+
+| Design Intent | Implementation | Gap |
+|--------------|----------------|-----|
+| LangGraph as PRIMARY adapter | ✅ `LangGraphStateAdapter` | None |
+| AgentGit as backup | ⏸️ Deprecated, not maintained | Intentional |
+| String-based checkpoint IDs | ⚠️ Interface uses int | Minor - mapping workaround |
+| Unit of Work for ACID | ✅ `SQLAlchemyUnitOfWork` | None |
+| Outbox Pattern for cross-DB | ✅ Implemented | None |
+
+**Overall:** Implementation matches design with minor ID type gap.
+
+---
+
+## 4. Related Documents
+
+| Document | Description |
+|----------|-------------|
+| [../Project_Init/INDEX.md](../Project_Init/INDEX.md) | Main documentation |
+| [../Project_Init/ARCHITECTURE_STRUCTURE.md](../Project_Init/ARCHITECTURE_STRUCTURE.md) | Full architecture |
+| [../LangGraph/INDEX.md](../LangGraph/INDEX.md) | LangGraph integration |
+| [../issues/GAP_ANALYSIS_2026_01_15_STATE_ADAPTER_ID_MISMATCH.md](../issues/GAP_ANALYSIS_2026_01_15_STATE_ADAPTER_ID_MISMATCH.md) | ID mismatch details |

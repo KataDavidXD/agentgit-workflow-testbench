@@ -3,17 +3,38 @@ Environment Provider Implementations.
 
 Provides execution environment isolation for batch testing variants.
 
+ARCHITECTURE DECISION (2026-01-15):
+- UV Venv Manager = ENVIRONMENT PROVISIONING ONLY
+- Ray = NODE EXECUTION (using provisioned python_path)
+- A node is a COMPLETE PROJECT (e.g., RAG pipeline), not a code snippet
+
 Usage:
     provider = RayEnvironmentProvider()
     env = provider.create_environment("variant-1", {"pip": ["numpy"]})
     runtime_env = provider.get_runtime_env("variant-1")
+    
+    # For gRPC-based UV Venv Manager:
+    provider = GrpcEnvironmentProvider("localhost:50051")
+    env = provider.create_environment("variant-1", {
+        "workflow_id": "ml_pipeline",
+        "node_id": "rag",
+        "packages": ["langchain", "chromadb"],
+    })
+    # Returns env_path, python_path for Ray to use
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
+from pathlib import Path
+import hashlib
+import json
 import logging
+import sys
 
 from wtb.domain.interfaces.batch_runner import IEnvironmentProvider
+
+if TYPE_CHECKING:
+    from wtb.infrastructure.environment.venv_cache import VenvCacheManager, VenvSpec
 
 logger = logging.getLogger(__name__)
 
@@ -200,81 +221,488 @@ class RayEnvironmentProvider(IEnvironmentProvider):
 
 class GrpcEnvironmentProvider(IEnvironmentProvider):
     """
-    gRPC-based environment provider (STUB).
+    gRPC-based environment provider calling UV Venv Manager service.
     
-    Wraps a colleague's gRPC environment management service.
-    This is a placeholder for future integration.
+    RESPONSIBILITY: Provision environments for workflow nodes.
+    NOT responsible for: Executing node logic (that's Ray's job).
     
-    The gRPC service is expected to provide:
-    - CreateEnvironment(variant_id, config) -> env_id
-    - DestroyEnvironment(env_id)
-    - GetEnvironment(env_id) -> runtime_config
+    A node is a COMPLETE PROJECT (e.g., RAG pipeline), not a code snippet.
+    The environment provides the Python interpreter and dependencies.
+    Ray actors execute the node project using the provisioned environment.
+    
+    Features:
+    - gRPC connection to UV Venv Manager service
+    - Venv spec hash tracking for invalidation
+    - Integration with VenvCacheManager for caching
+    - Workspace-aware venv creation
+    
+    Usage:
+        provider = GrpcEnvironmentProvider("localhost:50051")
+        
+        # Create environment with dependencies
+        env = provider.create_environment("variant-1", {
+            "workflow_id": "ml_pipeline",
+            "node_id": "rag",
+            "packages": ["langchain", "chromadb"],
+            "python_version": "3.11",
+        })
+        
+        # Get runtime env for Ray
+        runtime_env = provider.get_runtime_env("variant-1")
+        # Returns: {"python_path": "/path/to/.venv/bin/python", ...}
+        
+        # Create workspace-bound environment
+        env = provider.create_workspace_environment(
+            workspace_id="ws-123",
+            workspace_path="/path/to/workspace",
+            spec=VenvSpec(python_version="3.12", packages=["langchain"]),
+        )
     """
     
     def __init__(
         self,
         grpc_address: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,  # Environment creation can take time
+        default_python: str = "3.12",
+        venv_cache: Optional["VenvCacheManager"] = None,
+        event_bus: Optional[Any] = None,
     ):
         """
         Initialize gRPC provider.
         
         Args:
             grpc_address: gRPC service address (host:port)
-            timeout_seconds: RPC timeout
+            timeout_seconds: RPC timeout (default 120s for package installation)
+            default_python: Default Python version
+            venv_cache: Optional venv cache for efficient reuse
+            event_bus: Optional event bus for publishing events
         """
         self._grpc_address = grpc_address
         self._timeout = timeout_seconds
-        self._environments: Dict[str, str] = {}  # variant_id -> remote_env_id
+        self._default_python = default_python
+        self._environments: Dict[str, Dict[str, Any]] = {}  # variant_id -> env_info
+        self._channel = None
+        self._stub = None
+        self._venv_cache = venv_cache
+        self._event_bus = event_bus
         
-        # TODO: Initialize gRPC channel
-        # self._channel = grpc.insecure_channel(grpc_address)
-        # self._stub = environment_pb2_grpc.EnvironmentServiceStub(self._channel)
-        
-        logger.warning(
-            "GrpcEnvironmentProvider is a stub. "
-            "Full implementation requires gRPC proto definitions."
-        )
+        self._init_grpc()
+    
+    def _init_grpc(self) -> None:
+        """Initialize gRPC channel and stub."""
+        try:
+            import grpc
+            from wtb.infrastructure.environment.uv_manager.grpc_generated import (
+                env_manager_pb2_grpc as pb2_grpc,
+            )
+            
+            self._channel = grpc.insecure_channel(self._grpc_address)
+            self._stub = pb2_grpc.EnvManagerServiceStub(self._channel)
+            logger.info(f"GrpcEnvironmentProvider connected to {self._grpc_address}")
+        except ImportError as e:
+            logger.warning(
+                f"gRPC dependencies not available: {e}. "
+                "Install grpcio and generate proto files."
+            )
+            self._channel = None
+            self._stub = None
+    
+    def _get_python_path(self, env_path: str) -> str:
+        """Get Python interpreter path for the environment."""
+        if sys.platform == "win32":
+            return f"{env_path}\\.venv\\Scripts\\python.exe"
+        return f"{env_path}/.venv/bin/python"
     
     def create_environment(
         self,
         variant_id: str,
         config: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Create environment via gRPC (stub)."""
-        # TODO: Implement gRPC call
-        # request = environment_pb2.CreateEnvironmentRequest(
-        #     variant_id=variant_id,
-        #     config=json.dumps(config),
-        # )
-        # response = self._stub.CreateEnvironment(request, timeout=self._timeout)
-        # self._environments[variant_id] = response.env_id
+        """
+        Provision environment via gRPC.
         
-        logger.info(f"[STUB] Would create gRPC environment for {variant_id}")
-        self._environments[variant_id] = f"grpc-{variant_id}"
+        Returns env_path which can be used by Ray to:
+        - Set VIRTUAL_ENV environment variable
+        - Use {env_path}/.venv/bin/python as interpreter
+        - Mount as volume if using containers
         
-        return {"type": "grpc", "variant_id": variant_id}
+        Args:
+            variant_id: Unique identifier for this variant
+            config: {
+                "workflow_id": str,
+                "node_id": str,
+                "version_id": str,  # Optional: for node variants
+                "packages": List[str],
+                "python_version": str,
+            }
+        
+        Returns:
+            {
+                "type": "grpc_uv",
+                "env_path": "/path/to/envs/workflow_node_version",
+                "python_path": "/path/to/envs/.../bin/python",
+                "venv_path": "/path/to/envs/.../.venv",
+                ...
+            }
+        """
+        if self._stub is None:
+            logger.warning(f"gRPC not available, returning stub response for {variant_id}")
+            self._environments[variant_id] = {
+                "type": "grpc_uv_stub",
+                "variant_id": variant_id,
+            }
+            return self._environments[variant_id]
+        
+        try:
+            from wtb.infrastructure.environment.uv_manager.grpc_generated import (
+                env_manager_pb2 as pb2,
+            )
+            
+            workflow_id = config.get("workflow_id", "default")
+            node_id = config.get("node_id", variant_id)
+            version_id = config.get("version_id", "")
+            packages = config.get("packages", [])
+            python_version = config.get("python_version", self._default_python)
+            
+            request = pb2.CreateEnvRequest(
+                workflow_id=workflow_id,
+                node_id=node_id,
+                version_id=version_id,
+                python_version=python_version,
+                packages=packages,
+            )
+            
+            response = self._stub.CreateEnv(request, timeout=self._timeout)
+            
+            env_path = response.env_path
+            python_path = self._get_python_path(env_path)
+            
+            env_info = {
+                "type": "grpc_uv",
+                "workflow_id": response.workflow_id,
+                "node_id": response.node_id,
+                "version_id": response.version_id,
+                "env_path": env_path,
+                "python_path": python_path,
+                "venv_path": f"{env_path}/.venv",
+                "python_version": response.python_version,
+                "status": response.status,
+            }
+            
+            self._environments[variant_id] = env_info
+            logger.info(f"Created gRPC environment for {variant_id}: {env_path}")
+            
+            return env_info
+            
+        except Exception as e:
+            logger.error(f"Failed to create gRPC environment for {variant_id}: {e}")
+            raise
     
     def cleanup_environment(self, variant_id: str) -> None:
-        """Cleanup environment via gRPC (stub)."""
-        remote_id = self._environments.pop(variant_id, None)
+        """
+        Cleanup environment.
         
-        if remote_id:
-            # TODO: Implement gRPC call
-            # request = environment_pb2.DestroyEnvironmentRequest(env_id=remote_id)
-            # self._stub.DestroyEnvironment(request, timeout=self._timeout)
-            logger.info(f"[STUB] Would destroy gRPC environment {remote_id}")
+        Note: Actual cleanup is handled by service TTL.
+        This just removes local tracking.
+        """
+        env_info = self._environments.pop(variant_id, None)
+        
+        if env_info and self._stub is not None:
+            try:
+                from wtb.infrastructure.environment.uv_manager.grpc_generated import (
+                    env_manager_pb2 as pb2,
+                )
+                
+                request = pb2.DeleteEnvRequest(
+                    workflow_id=env_info.get("workflow_id", ""),
+                    node_id=env_info.get("node_id", ""),
+                    version_id=env_info.get("version_id", ""),
+                )
+                
+                self._stub.DeleteEnv(request, timeout=self._timeout)
+                logger.info(f"Deleted gRPC environment for {variant_id}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to delete gRPC environment for {variant_id}: {e}")
     
     def get_runtime_env(self, variant_id: str) -> Optional[Dict[str, Any]]:
-        """Get runtime_env from gRPC service (stub)."""
-        remote_id = self._environments.get(variant_id)
-        if remote_id is None:
+        """
+        Get Ray-compatible runtime environment specification.
+        
+        Returns a dict that can be used with Ray's runtime_env feature
+        or to configure subprocess execution.
+        """
+        env_info = self._environments.get(variant_id)
+        if not env_info:
             return None
         
-        # TODO: Implement gRPC call
-        # request = environment_pb2.GetEnvironmentRequest(env_id=remote_id)
-        # response = self._stub.GetEnvironment(request, timeout=self._timeout)
-        # return json.loads(response.runtime_config)
+        env_path = env_info.get("env_path", "")
+        python_path = env_info.get("python_path", "")
+        venv_path = env_info.get("venv_path", "")
         
-        return {"type": "grpc", "remote_id": remote_id}
+        return {
+            "type": "grpc_uv",
+            "env_path": env_path,
+            "python_path": python_path,
+            "venv_path": venv_path,
+            # For Ray runtime_env
+            "env_vars": {
+                "VIRTUAL_ENV": venv_path,
+            },
+            # Ray py_executable
+            "py_executable": python_path,
+        }
+    
+    def create_workspace_environment(
+        self,
+        workspace_id: str,
+        workspace_path: str,
+        python_version: Optional[str] = None,
+        packages: Optional[List[str]] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Create environment bound to a specific workspace.
+        
+        This method creates a venv in the workspace's .venv directory,
+        using the cache if available for efficiency.
+        
+        Args:
+            workspace_id: Workspace identifier
+            workspace_path: Path to workspace root
+            python_version: Python version (default: provider default)
+            packages: List of packages to install
+            use_cache: Whether to use venv cache
+            
+        Returns:
+            Environment info dict with paths and spec_hash
+        """
+        python_ver = python_version or self._default_python
+        pkg_list = packages or []
+        
+        # Compute spec hash for cache lookup
+        spec_hash = self._compute_spec_hash(python_ver, pkg_list)
+        
+        workspace_venv_path = Path(workspace_path) / ".venv"
+        
+        # Try cache first
+        if use_cache and self._venv_cache:
+            if self._venv_cache.copy_to_workspace(spec_hash, workspace_venv_path):
+                logger.info(f"Used cached venv for workspace {workspace_id}")
+                
+                env_info = self._build_env_info(
+                    workspace_id=workspace_id,
+                    env_path=workspace_path,
+                    python_version=python_ver,
+                    spec_hash=spec_hash,
+                    from_cache=True,
+                )
+                self._environments[workspace_id] = env_info
+                
+                # Publish event
+                self._publish_venv_reused_event(workspace_id, spec_hash)
+                
+                return env_info
+        
+        # Create new venv via gRPC
+        env_info = self.create_environment(workspace_id, {
+            "workflow_id": workspace_id,
+            "node_id": "workspace",
+            "packages": pkg_list,
+            "python_version": python_ver,
+        })
+        
+        # Copy to workspace path if created elsewhere
+        if env_info.get("env_path") and env_info["env_path"] != workspace_path:
+            import shutil
+            source_venv = Path(env_info["env_path"]) / ".venv"
+            if source_venv.exists():
+                if workspace_venv_path.exists():
+                    shutil.rmtree(workspace_venv_path)
+                shutil.copytree(source_venv, workspace_venv_path)
+        
+        # Update env_info with workspace paths
+        env_info.update({
+            "workspace_id": workspace_id,
+            "workspace_path": workspace_path,
+            "venv_path": str(workspace_venv_path),
+            "python_path": self._get_python_path(workspace_path),
+            "spec_hash": spec_hash,
+            "from_cache": False,
+        })
+        
+        self._environments[workspace_id] = env_info
+        
+        # Add to cache if available
+        if use_cache and self._venv_cache and workspace_venv_path.exists():
+            from wtb.infrastructure.environment.venv_cache import VenvSpec
+            spec = VenvSpec(
+                python_version=python_ver,
+                packages=pkg_list,
+            )
+            self._venv_cache.put(spec, workspace_venv_path, copy_to_cache=True)
+        
+        # Publish event
+        self._publish_venv_created_event(
+            workspace_id=workspace_id,
+            venv_path=str(workspace_venv_path),
+            python_version=python_ver,
+            packages=pkg_list,
+            spec_hash=spec_hash,
+        )
+        
+        return env_info
+    
+    def _compute_spec_hash(
+        self,
+        python_version: str,
+        packages: List[str],
+    ) -> str:
+        """Compute hash for venv specification."""
+        spec_data = {
+            "python_version": python_version,
+            "packages": sorted(packages),
+        }
+        spec_json = json.dumps(spec_data, sort_keys=True)
+        return hashlib.sha256(spec_json.encode()).hexdigest()[:16]
+    
+    def _build_env_info(
+        self,
+        workspace_id: str,
+        env_path: str,
+        python_version: str,
+        spec_hash: str,
+        from_cache: bool,
+    ) -> Dict[str, Any]:
+        """Build environment info dictionary."""
+        venv_path = f"{env_path}/.venv"
+        return {
+            "type": "grpc_uv",
+            "workspace_id": workspace_id,
+            "env_path": env_path,
+            "venv_path": venv_path,
+            "python_path": self._get_python_path(env_path),
+            "python_version": python_version,
+            "spec_hash": spec_hash,
+            "from_cache": from_cache,
+            "status": "ready",
+        }
+    
+    def check_venv_compatibility(
+        self,
+        workspace_id: str,
+        expected_spec_hash: str,
+    ) -> bool:
+        """
+        Check if workspace venv is compatible with expected spec.
+        
+        Used during rollback to detect venv spec changes.
+        
+        Args:
+            workspace_id: Workspace identifier
+            expected_spec_hash: Expected venv spec hash from checkpoint
+            
+        Returns:
+            True if compatible (hashes match), False otherwise
+        """
+        env_info = self._environments.get(workspace_id)
+        if not env_info:
+            return False
+        
+        current_hash = env_info.get("spec_hash", "")
+        return current_hash == expected_spec_hash
+    
+    def invalidate_environment(self, workspace_id: str) -> bool:
+        """
+        Invalidate environment for workspace (spec changed).
+        
+        Args:
+            workspace_id: Workspace identifier
+            
+        Returns:
+            True if invalidated, False if not found
+        """
+        env_info = self._environments.pop(workspace_id, None)
+        if not env_info:
+            return False
+        
+        # Also cleanup via gRPC if applicable
+        self.cleanup_environment(workspace_id)
+        
+        # Publish event
+        if self._event_bus:
+            from wtb.domain.events.workspace_events import VenvInvalidatedEvent
+            try:
+                self._event_bus.publish(VenvInvalidatedEvent(
+                    node_id=workspace_id,
+                    old_spec_hash=env_info.get("spec_hash", ""),
+                    new_spec_hash="",
+                    reason="manual_invalidation",
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to publish invalidation event: {e}")
+        
+        return True
+    
+    def _publish_venv_created_event(
+        self,
+        workspace_id: str,
+        venv_path: str,
+        python_version: str,
+        packages: List[str],
+        spec_hash: str,
+    ) -> None:
+        """Publish VenvCreatedEvent."""
+        if not self._event_bus:
+            return
+        
+        try:
+            from wtb.domain.events.workspace_events import VenvCreatedEvent
+            self._event_bus.publish(VenvCreatedEvent(
+                workspace_id=workspace_id,
+                execution_id="",
+                venv_path=venv_path,
+                python_version=python_version,
+                packages=packages,
+                venv_spec_hash=spec_hash,
+                creation_time_ms=0.0,
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to publish venv created event: {e}")
+    
+    def _publish_venv_reused_event(
+        self,
+        workspace_id: str,
+        spec_hash: str,
+    ) -> None:
+        """Publish VenvReusedEvent."""
+        if not self._event_bus:
+            return
+        
+        try:
+            from wtb.domain.events.workspace_events import VenvReusedEvent
+            self._event_bus.publish(VenvReusedEvent(
+                workspace_id=workspace_id,
+                venv_path="",
+                venv_spec_hash=spec_hash,
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to publish venv reused event: {e}")
+    
+    def list_environments(self) -> Dict[str, Dict[str, Any]]:
+        """List all created environments."""
+        return dict(self._environments)
+    
+    def close(self) -> None:
+        """Close gRPC channel."""
+        if self._channel:
+            self._channel.close()
+            self._channel = None
+            self._stub = None
+    
+    def __enter__(self) -> "GrpcEnvironmentProvider":
+        return self
+    
+    def __exit__(self, *args) -> None:
+        self.close()
 

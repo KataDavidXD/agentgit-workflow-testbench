@@ -1,23 +1,38 @@
 """
 State adapters - Anti-corruption layer implementations.
 
-Provides different implementations of IStateAdapter for various backends:
-- InMemoryStateAdapter: For testing and development (no persistence)
-- AgentGitStateAdapter: For production (integrates with AgentGit checkpoints)
+Refactored (v1.6):
+- LangGraphStateAdapter: PRIMARY for all workflows (string IDs native)
+- InMemoryStateAdapter: For testing (string IDs)
+- AgentGitStateAdapter: REMOVED (use LangGraph instead)
+
+All adapters now use string IDs throughout (UUIDs).
 """
 
 from .inmemory_state_adapter import InMemoryStateAdapter
 
-# Conditionally import AgentGitStateAdapter (requires agentgit package)
+# Conditionally import LangGraphStateAdapter (requires langgraph package)
 try:
-    from .agentgit_state_adapter import AgentGitStateAdapter
-    _HAS_AGENTGIT = True
+    from .langgraph_state_adapter import (
+        LangGraphStateAdapter,
+        LangGraphConfig,
+        LangGraphStateAdapterFactory,
+        CheckpointerType,
+        LANGGRAPH_AVAILABLE,
+    )
+    _HAS_LANGGRAPH = LANGGRAPH_AVAILABLE
 except ImportError:
-    AgentGitStateAdapter = None  # type: ignore
-    _HAS_AGENTGIT = False
+    LangGraphStateAdapter = None  # type: ignore
+    LangGraphConfig = None  # type: ignore
+    LangGraphStateAdapterFactory = None  # type: ignore
+    CheckpointerType = None  # type: ignore
+    _HAS_LANGGRAPH = False
 
 __all__ = [
     "InMemoryStateAdapter",
-    "AgentGitStateAdapter",
+    "LangGraphStateAdapter",
+    "LangGraphConfig",
+    "LangGraphStateAdapterFactory",
+    "CheckpointerType",
+    "LANGGRAPH_AVAILABLE",
 ]
-

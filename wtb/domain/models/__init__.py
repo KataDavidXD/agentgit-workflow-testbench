@@ -12,7 +12,15 @@ from .workflow import (
 )
 
 from .node_boundary import NodeBoundary
-from .checkpoint_file import CheckpointFile
+# CheckpointFile REMOVED (2026-01-27) - Use CheckpointFileLink from file_processing
+from .checkpoint import (
+    Checkpoint,
+    CheckpointId,
+    ExecutionHistory,
+    CheckpointNotFoundError,
+    InvalidRollbackTargetError,
+    ExecutionHistoryError,
+)
 from .batch_test import (
     BatchTest,
     BatchTestStatus,
@@ -36,6 +44,31 @@ from .integrity import (
     IntegrityReport,
     RepairAction,
 )
+from .file_processing import (
+    FileCommit,
+    FileMemento,
+    BlobId,
+    CommitId,
+    CheckpointFileLink,
+    CommitStatus,
+    FileProcessingError,
+    DuplicateFileError,
+    InvalidBlobIdError,
+    InvalidCommitIdError,
+    CommitAlreadyFinalized,
+)
+# Backward compatibility alias (2026-01-27)
+FileCheckpointLink = CheckpointFileLink
+from .workspace import (
+    Workspace,
+    WorkspaceConfig,
+    WorkspaceStrategy,
+    LinkMethod,
+    LinkResult,
+    OrphanWorkspace,
+    CleanupReport,
+    compute_venv_spec_hash,
+)
 
 __all__ = [
     # Workflow models
@@ -49,8 +82,15 @@ __all__ = [
     "InvalidStateTransition",
     # Node boundary
     "NodeBoundary",
-    # Checkpoint-file link
-    "CheckpointFile",
+    # Checkpoint-file link (2026-01-27: Consolidated to CheckpointFileLink)
+    "CheckpointFileLink",
+    # Checkpoint (DDD - 2026-01-15)
+    "Checkpoint",
+    "CheckpointId",
+    "ExecutionHistory",
+    "CheckpointNotFoundError",
+    "InvalidRollbackTargetError",
+    "ExecutionHistoryError",
     # Batch test
     "BatchTest",
     "BatchTestStatus",
@@ -70,4 +110,25 @@ __all__ = [
     "IntegritySeverity",
     "IntegrityReport",
     "RepairAction",
+    # File Processing (2026-01-15)
+    "FileCommit",
+    "FileMemento",
+    "BlobId",
+    "CommitId",
+    "FileCheckpointLink",
+    "CommitStatus",
+    "FileProcessingError",
+    "DuplicateFileError",
+    "InvalidBlobIdError",
+    "InvalidCommitIdError",
+    "CommitAlreadyFinalized",
+    # Workspace Isolation (2026-01-16)
+    "Workspace",
+    "WorkspaceConfig",
+    "WorkspaceStrategy",
+    "LinkMethod",
+    "LinkResult",
+    "OrphanWorkspace",
+    "CleanupReport",
+    "compute_venv_spec_hash",
 ]

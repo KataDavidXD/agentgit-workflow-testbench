@@ -32,13 +32,99 @@ Usage:
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 
 # ═══════════════════════════════════════════════════════════════
 # Ray Configuration
 # ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class LangGraphEventConfig:
+    """
+    LangGraph event streaming and audit configuration.
+    
+    Attributes:
+        enabled: Enable LangGraph event bridging
+        stream_modes: List of stream modes to enable
+        include_inputs: Include input state in events (may contain PII)
+        include_outputs: Include output state in events
+        emit_audit_events: Emit LangGraphAuditEvent instances
+        prometheus_enabled: Enable Prometheus metrics export
+        filter_internal: Filter internal LangGraph nodes
+    """
+    enabled: bool = True
+    stream_modes: List[str] = field(default_factory=lambda: ["updates"])
+    include_inputs: bool = False
+    include_outputs: bool = True
+    emit_audit_events: bool = True
+    prometheus_enabled: bool = False
+    filter_internal: bool = True
+    
+    @classmethod
+    def for_testing(cls) -> "LangGraphEventConfig":
+        """Config for unit tests."""
+        return cls(
+            enabled=True,
+            stream_modes=["updates"],
+            include_inputs=False,
+            include_outputs=True,
+            emit_audit_events=False,
+            prometheus_enabled=False,
+        )
+    
+    @classmethod
+    def for_development(cls) -> "LangGraphEventConfig":
+        """Config for development with full debugging."""
+        return cls(
+            enabled=True,
+            stream_modes=["values", "updates", "debug", "custom"],
+            include_inputs=True,
+            include_outputs=True,
+            emit_audit_events=True,
+            prometheus_enabled=False,
+            filter_internal=False,
+        )
+    
+    @classmethod
+    def for_production(cls) -> "LangGraphEventConfig":
+        """Config for production with metrics."""
+        return cls(
+            enabled=True,
+            stream_modes=["updates", "custom"],
+            include_inputs=False,
+            include_outputs=True,
+            emit_audit_events=True,
+            prometheus_enabled=True,
+            filter_internal=True,
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "enabled": self.enabled,
+            "stream_modes": self.stream_modes,
+            "include_inputs": self.include_inputs,
+            "include_outputs": self.include_outputs,
+            "emit_audit_events": self.emit_audit_events,
+            "prometheus_enabled": self.prometheus_enabled,
+            "filter_internal": self.filter_internal,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LangGraphEventConfig":
+        """Deserialize from dictionary."""
+        return cls(
+            enabled=data.get("enabled", True),
+            stream_modes=data.get("stream_modes", ["updates"]),
+            include_inputs=data.get("include_inputs", False),
+            include_outputs=data.get("include_outputs", True),
+            emit_audit_events=data.get("emit_audit_events", True),
+            prometheus_enabled=data.get("prometheus_enabled", False),
+            filter_internal=data.get("filter_internal", True),
+        )
 
 
 @dataclass
@@ -54,6 +140,7 @@ class RayConfig:
         max_retries: Max retries for failed tasks
         runtime_env: Optional runtime environment specification
         object_store_memory_gb: Object store memory allocation
+        task_timeout_seconds: Timeout for individual task execution
     """
     ray_address: str = "auto"
     num_cpus_per_task: float = 1.0
@@ -62,6 +149,7 @@ class RayConfig:
     max_retries: int = 3
     runtime_env: Optional[Dict[str, Any]] = None
     object_store_memory_gb: Optional[float] = None
+    task_timeout_seconds: float = 3600.0  # 1 hour default
     
     @classmethod
     def for_local_development(cls) -> "RayConfig":
@@ -72,6 +160,7 @@ class RayConfig:
             memory_per_task_gb=1.0,
             max_pending_tasks=4,
             max_retries=1,
+            task_timeout_seconds=300.0,
         )
     
     @classmethod
@@ -88,6 +177,7 @@ class RayConfig:
             memory_per_task_gb=memory_gb,
             max_pending_tasks=num_workers * 2,
             max_retries=3,
+            task_timeout_seconds=7200.0,
         )
     
     @classmethod
@@ -99,6 +189,7 @@ class RayConfig:
             memory_per_task_gb=0.5,
             max_pending_tasks=2,
             max_retries=1,
+            task_timeout_seconds=60.0,
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -111,7 +202,155 @@ class RayConfig:
             "max_retries": self.max_retries,
             "runtime_env": self.runtime_env,
             "object_store_memory_gb": self.object_store_memory_gb,
+            "task_timeout_seconds": self.task_timeout_seconds,
         }
+
+
+# ═══════════════════════════════════════════════════════════════
+# FileTracking Configuration
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class FileTrackingConfig:
+    """
+    FileTracker integration configuration.
+    
+    Configures the connection to FileTracker system for file version control
+    integration with WTB checkpoints. Supports different deployment modes.
+    
+    Attributes:
+        enabled: Enable file tracking integration
+        postgres_url: PostgreSQL connection string for FileTracker DB
+        storage_path: Path for blob storage (content-addressed files)
+        wtb_db_url: WTB database URL for checkpoint_files table
+        auto_track_patterns: Glob patterns for auto-tracking (e.g., ["*.csv", "*.pkl"])
+        excluded_patterns: Patterns to exclude from tracking (e.g., ["*.tmp", "*.log"])
+        max_file_size_mb: Maximum file size to track (in MB)
+        
+    Design Decisions:
+    - Separate from WTBConfig for Ray serialization (actors receive this config)
+    - Supports SQLite (dev) and PostgreSQL (prod) backends
+    - Patterns support for automatic file discovery
+    """
+    enabled: bool = False
+    postgres_url: Optional[str] = None
+    storage_path: str = "./file_storage"
+    wtb_db_url: Optional[str] = None
+    auto_track_patterns: List[str] = field(default_factory=lambda: ["*.csv", "*.pkl", "*.json", "*.parquet"])
+    excluded_patterns: List[str] = field(default_factory=lambda: ["*.tmp", "*.log", "*.pyc", "__pycache__/*"])
+    max_file_size_mb: float = 100.0
+    
+    @classmethod
+    def for_testing(cls) -> "FileTrackingConfig":
+        """
+        In-memory mock configuration for testing.
+        
+        Returns:
+            FileTrackingConfig with tracking disabled
+        """
+        return cls(enabled=False)
+    
+    @classmethod
+    def for_development(
+        cls,
+        storage_path: str = "./data/file_storage",
+        wtb_db_url: str = "sqlite:///data/wtb.db",
+    ) -> "FileTrackingConfig":
+        """
+        SQLite-based configuration for development.
+        
+        Args:
+            storage_path: Local path for file blobs
+            wtb_db_url: WTB SQLite database URL
+            
+        Returns:
+            FileTrackingConfig for development
+        """
+        return cls(
+            enabled=True,
+            postgres_url=None,  # Use SQLite via WTB DB
+            storage_path=storage_path,
+            wtb_db_url=wtb_db_url,
+        )
+    
+    @classmethod
+    def for_production(
+        cls,
+        postgres_url: str,
+        storage_path: str,
+        wtb_db_url: str,
+    ) -> "FileTrackingConfig":
+        """
+        PostgreSQL configuration for production.
+        
+        Args:
+            postgres_url: PostgreSQL connection string
+            storage_path: Network/shared storage path for file blobs
+            wtb_db_url: WTB PostgreSQL database URL
+            
+        Returns:
+            FileTrackingConfig for production
+        """
+        return cls(
+            enabled=True,
+            postgres_url=postgres_url,
+            storage_path=storage_path,
+            wtb_db_url=wtb_db_url,
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize to dictionary.
+        
+        Used for Ray serialization when passing config to actors.
+        
+        Returns:
+            Dictionary representation
+        """
+        return {
+            "enabled": self.enabled,
+            "postgres_url": self.postgres_url,
+            "storage_path": self.storage_path,
+            "wtb_db_url": self.wtb_db_url,
+            "auto_track_patterns": self.auto_track_patterns,
+            "excluded_patterns": self.excluded_patterns,
+            "max_file_size_mb": self.max_file_size_mb,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FileTrackingConfig":
+        """
+        Deserialize from dictionary.
+        
+        Used by Ray actors to reconstruct config.
+        
+        Args:
+            data: Dictionary with config values
+            
+        Returns:
+            FileTrackingConfig instance
+        """
+        return cls(
+            enabled=data.get("enabled", False),
+            postgres_url=data.get("postgres_url"),
+            storage_path=data.get("storage_path", "./file_storage"),
+            wtb_db_url=data.get("wtb_db_url"),
+            auto_track_patterns=data.get("auto_track_patterns", ["*.csv", "*.pkl", "*.json"]),
+            excluded_patterns=data.get("excluded_patterns", ["*.tmp", "*.log"]),
+            max_file_size_mb=data.get("max_file_size_mb", 100.0),
+        )
+    
+    def ensure_storage_path(self) -> Path:
+        """
+        Ensure storage path exists.
+        
+        Returns:
+            Path to storage directory
+        """
+        path = Path(self.storage_path)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -162,9 +401,15 @@ class WTBConfig:
     ray_enabled: bool = False
     ray_config: Optional[RayConfig] = None
     
+    # File tracking integration
+    file_tracking_config: Optional[FileTrackingConfig] = None
+    
     # Environment provider
     environment_provider: str = "inprocess"  # "ray", "grpc", "inprocess"
     grpc_env_manager_url: Optional[str] = None
+    
+    # LangGraph event configuration
+    langgraph_event_config: Optional[LangGraphEventConfig] = None
     
     # Logging
     log_sql: bool = False
@@ -229,6 +474,7 @@ class WTBConfig:
             data_dir="data",
             filetracker_enabled=False,
             ide_sync_enabled=False,
+            langgraph_event_config=LangGraphEventConfig.for_testing(),
         )
     
     @classmethod
@@ -250,6 +496,7 @@ class WTBConfig:
             data_dir=data_dir,
             filetracker_enabled=False,
             ide_sync_enabled=False,
+            langgraph_event_config=LangGraphEventConfig.for_development(),
             log_sql=True,
         )
     
@@ -279,6 +526,7 @@ class WTBConfig:
             data_dir=data_dir,
             filetracker_enabled=True,
             ide_sync_enabled=True,
+            langgraph_event_config=LangGraphEventConfig.for_production(),
             log_sql=False,
             log_level="WARNING",
         )
@@ -315,30 +563,43 @@ class WTBConfig:
         agentgit_db_path: str = "data/agentgit.db",
         data_dir: str = "data",
         num_ray_workers: int = 10,
+        filetracker_postgres_url: Optional[str] = None,
+        file_storage_path: str = "/data/file_storage",
     ) -> "WTBConfig":
         """
-        Create config for production with Ray batch testing.
+        Create config for production with Ray batch testing and FileTracker.
         
         Args:
-            db_url: PostgreSQL database URL
+            db_url: PostgreSQL database URL for WTB
             ray_address: Ray cluster address
             agentgit_db_path: Path to AgentGit database
             data_dir: Directory for local files
             num_ray_workers: Number of Ray workers
+            filetracker_postgres_url: PostgreSQL URL for FileTracker (optional)
+            file_storage_path: Path for file blob storage
             
         Returns:
-            WTBConfig with PostgreSQL and Ray enabled
+            WTBConfig with PostgreSQL, Ray, and FileTracker enabled
         """
+        file_tracking = None
+        if filetracker_postgres_url:
+            file_tracking = FileTrackingConfig.for_production(
+                postgres_url=filetracker_postgres_url,
+                storage_path=file_storage_path,
+                wtb_db_url=db_url,
+            )
+        
         return cls(
             wtb_storage_mode="sqlalchemy",
             wtb_db_url=db_url,
             agentgit_db_path=agentgit_db_path,
             state_adapter_mode="agentgit",
             data_dir=data_dir,
-            filetracker_enabled=True,
+            filetracker_enabled=filetracker_postgres_url is not None,
             ide_sync_enabled=True,
             ray_enabled=True,
             ray_config=RayConfig.for_production(ray_address, num_ray_workers),
+            file_tracking_config=file_tracking,
             environment_provider="ray",
             log_sql=False,
             log_level="WARNING",
@@ -367,6 +628,10 @@ class WTBConfig:
             "filetracker_storage_path": self.filetracker_storage_path,
             "ide_sync_enabled": self.ide_sync_enabled,
             "ide_sync_url": self.ide_sync_url,
+            "ray_enabled": self.ray_enabled,
+            "ray_config": self.ray_config.to_dict() if self.ray_config else None,
+            "file_tracking_config": self.file_tracking_config.to_dict() if self.file_tracking_config else None,
+            "langgraph_event_config": self.langgraph_event_config.to_dict() if self.langgraph_event_config else None,
             "log_sql": self.log_sql,
             "log_level": self.log_level,
         }

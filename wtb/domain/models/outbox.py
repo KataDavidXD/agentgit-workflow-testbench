@@ -25,13 +25,25 @@ class OutboxEventType(Enum):
     CHECKPOINT_VERIFY = "checkpoint_verify"
     NODE_BOUNDARY_SYNC = "node_boundary_sync"
     
-    # FileTracker related
+    # FileTracker related - Basic
     FILE_COMMIT_LINK = "file_commit_link"
     FILE_COMMIT_VERIFY = "file_commit_verify"
     FILE_BLOB_VERIFY = "file_blob_verify"
     
+    # FileTracker related - Batch operations (2026-01-15)
+    FILE_BATCH_VERIFY = "file_batch_verify"
+    FILE_INTEGRITY_CHECK = "file_integrity_check"
+    FILE_RESTORE_VERIFY = "file_restore_verify"
+    
     # Cross-database joint verification
     CHECKPOINT_FILE_LINK_VERIFY = "checkpoint_file_link_verify"
+    
+    # Rollback/Recovery operations
+    ROLLBACK_FILE_RESTORE = "rollback_file_restore"
+    ROLLBACK_VERIFY = "rollback_verify"
+    
+    # Ray batch test events (2026-01-15)
+    RAY_EVENT = "ray_event"
 
 
 class OutboxStatus(Enum):
@@ -83,6 +95,7 @@ class OutboxEvent:
     
     created_at: datetime = field(default_factory=datetime.now)
     processed_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None  # For event publishing use case
     last_error: Optional[str] = None
     
     def can_retry(self) -> bool:
@@ -99,6 +112,12 @@ class OutboxEvent:
     def mark_processed(self) -> None:
         """Mark as successfully processed."""
         self.status = OutboxStatus.PROCESSED
+        self.processed_at = datetime.now()
+    
+    def mark_published(self) -> None:
+        """Mark as successfully published (for event publishing)."""
+        self.status = OutboxStatus.PROCESSED
+        self.published_at = datetime.now()
         self.processed_at = datetime.now()
     
     def mark_failed(self, error: str) -> None:
@@ -208,6 +227,104 @@ class OutboxEvent:
                 "execution_id": execution_id,
                 "checkpoint_id": checkpoint_id,
                 "file_commit_id": file_commit_id,
+            }
+        )
+    
+    @classmethod
+    def create_file_batch_verify(
+        cls,
+        execution_id: str,
+        commit_ids: list,
+        expected_total_files: int,
+        verify_blobs: bool = True,
+    ) -> "OutboxEvent":
+        """Factory method for batch file verification events."""
+        return cls(
+            event_type=OutboxEventType.FILE_BATCH_VERIFY,
+            aggregate_type="BatchTest",
+            aggregate_id=execution_id,
+            payload={
+                "commit_ids": commit_ids,
+                "expected_total_files": expected_total_files,
+                "verify_blobs": verify_blobs,
+            }
+        )
+    
+    @classmethod
+    def create_file_integrity_check(
+        cls,
+        commit_id: str,
+        file_hashes: dict,
+        verify_content: bool = False,
+    ) -> "OutboxEvent":
+        """Factory method for file integrity verification events."""
+        return cls(
+            event_type=OutboxEventType.FILE_INTEGRITY_CHECK,
+            aggregate_type="FileCommit",
+            aggregate_id=commit_id,
+            payload={
+                "file_hashes": file_hashes,
+                "verify_content": verify_content,
+            }
+        )
+    
+    @classmethod
+    def create_file_restore_verify(
+        cls,
+        execution_id: str,
+        checkpoint_id: int,
+        commit_id: str,
+        restored_paths: list,
+    ) -> "OutboxEvent":
+        """Factory method for file restore verification events."""
+        return cls(
+            event_type=OutboxEventType.FILE_RESTORE_VERIFY,
+            aggregate_type="Execution",
+            aggregate_id=execution_id,
+            payload={
+                "checkpoint_id": checkpoint_id,
+                "commit_id": commit_id,
+                "restored_paths": restored_paths,
+            }
+        )
+    
+    @classmethod
+    def create_rollback_file_restore(
+        cls,
+        execution_id: str,
+        source_checkpoint_id: int,
+        target_checkpoint_id: int,
+        source_commit_id: str,
+    ) -> "OutboxEvent":
+        """Factory method for rollback file restore events."""
+        return cls(
+            event_type=OutboxEventType.ROLLBACK_FILE_RESTORE,
+            aggregate_type="Execution",
+            aggregate_id=execution_id,
+            payload={
+                "source_checkpoint_id": source_checkpoint_id,
+                "target_checkpoint_id": target_checkpoint_id,
+                "source_commit_id": source_commit_id,
+            }
+        )
+    
+    @classmethod
+    def create_rollback_verify(
+        cls,
+        execution_id: str,
+        checkpoint_id: int,
+        restored_files_count: int,
+        state_verified: bool = False,
+    ) -> "OutboxEvent":
+        """Factory method for rollback verification events."""
+        return cls(
+            event_type=OutboxEventType.ROLLBACK_VERIFY,
+            aggregate_type="Execution",
+            aggregate_id=execution_id,
+            payload={
+                "checkpoint_id": checkpoint_id,
+                "restored_files_count": restored_files_count,
+                "state_verified": state_verified,
             }
         )
 

@@ -72,4 +72,9 @@ class WorkflowRepository(BaseRepository[TestWorkflow, WorkflowORM], IWorkflowRep
             .first()
         )
         return self._to_domain(orm) if orm else None
+    
+    def list_all(self) -> List[TestWorkflow]:
+        """List all workflows without pagination."""
+        orms = self._session.query(WorkflowORM).all()
+        return [self._to_domain(orm) for orm in orms]
 

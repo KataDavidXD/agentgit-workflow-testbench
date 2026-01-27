@@ -4,12 +4,28 @@ ThreadPool Batch Test Runner.
 Local multithreaded implementation of IBatchTestRunner for development
 and single-node execution.
 
+Refactored (v1.7):
+- Uses ExecutionControllerFactory for ACID-compliant isolated execution
+- Each thread gets its own ExecutionController + UoW (Isolation)
+- Removed placeholder _run_workflow_nodes() - actual execution via controller
+
+SOLID Compliance:
+- SRP: Orchestrates batch tests only, delegates execution to controller
+- OCP: New execution strategies via factory
+- DIP: Depends on factory callables, not concrete implementations
+
+ACID Compliance:
+- Atomicity: Each variant execution is atomic (UoW transaction)
+- Consistency: Unified execution path via ExecutionController
+- Isolation: Each thread has isolated UoW + StateAdapter
+- Durability: Results persisted via UoW.commit()
+
 Usage:
     from wtb.application.services.batch_test_runner import ThreadPoolBatchTestRunner
+    from wtb.application.factories import ExecutionControllerFactory
     
     runner = ThreadPoolBatchTestRunner(
-        uow_factory=UnitOfWorkFactory,
-        state_adapter_factory=lambda: InMemoryStateAdapter(),
+        controller_factory=ExecutionControllerFactory.get_factory_callable(config),
         max_workers=4,
     )
     
@@ -18,7 +34,7 @@ Usage:
 
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from threading import Lock
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass
 import time
@@ -31,7 +47,7 @@ from wtb.domain.models.batch_test import (
     BatchTestStatus,
     VariantCombination,
 )
-from wtb.domain.models.workflow import Execution, ExecutionStatus
+from wtb.domain.models.workflow import Execution, ExecutionStatus, TestWorkflow
 from wtb.domain.interfaces.batch_runner import (
     IBatchTestRunner,
     BatchRunnerStatus,
@@ -41,6 +57,9 @@ from wtb.domain.interfaces.batch_runner import (
 )
 from wtb.domain.interfaces.state_adapter import IStateAdapter
 from wtb.domain.interfaces.unit_of_work import IUnitOfWork
+
+if TYPE_CHECKING:
+    from wtb.application.factories import ManagedController
 
 logger = logging.getLogger(__name__)
 
@@ -60,31 +79,56 @@ class ThreadPoolBatchTestRunner(IBatchTestRunner):
     """
     ThreadPool-based batch test runner for local execution.
     
+    Refactored (v1.7):
+    - Uses ExecutionControllerFactory for ACID-compliant isolated execution
+    - Each thread gets its own ExecutionController + UoW (Isolation)
+    - Actual execution via ExecutionController (replaced placeholder)
+    
     Key Design Decisions:
     - ThreadPoolExecutor for I/O-bound operations (DB, LLM calls)
-    - Application-level isolation: each thread gets own UoW + StateAdapter
+    - Application-level isolation: each thread gets own controller + UoW
     - Progress tracking via internal state
     - Graceful cancellation support
+    
+    SOLID Compliance:
+    - SRP: Orchestrates batch tests only
+    - OCP: New execution strategies via factory
+    - DIP: Depends on factory callable abstraction
+    
+    ACID Compliance:
+    - Atomicity: Each variant in its own transaction
+    - Consistency: Unified execution via ExecutionController
+    - Isolation: Each thread has isolated dependencies
+    - Durability: Results persisted via UoW.commit()
     
     Thread Safety:
     - Uses Lock for internal state updates
     - Each worker thread has isolated dependencies
     
-    Usage:
+    Usage (v1.7):
+        from wtb.application.factories import ExecutionControllerFactory
+        
         runner = ThreadPoolBatchTestRunner(
-            uow_factory=lambda: InMemoryUnitOfWork(),
-            state_adapter_factory=lambda: InMemoryStateAdapter(),
+            controller_factory=ExecutionControllerFactory.get_factory_callable(config),
             max_workers=4,
         )
         
         batch_test = BatchTest(...)
         result = runner.run_batch_test(batch_test)
+        
+    Legacy Usage (backward compatible):
+        runner = ThreadPoolBatchTestRunner(
+            uow_factory=lambda: InMemoryUnitOfWork(),
+            state_adapter_factory=lambda: InMemoryStateAdapter(),
+            max_workers=4,
+        )
     """
     
     def __init__(
         self,
-        uow_factory: Callable[[], IUnitOfWork],
-        state_adapter_factory: Callable[[], IStateAdapter],
+        controller_factory: Optional[Callable[[], "ManagedController"]] = None,
+        uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
+        state_adapter_factory: Optional[Callable[[], IStateAdapter]] = None,
         max_workers: int = 4,
         execution_timeout_seconds: float = 300.0,
     ):
@@ -92,11 +136,17 @@ class ThreadPoolBatchTestRunner(IBatchTestRunner):
         Initialize the runner.
         
         Args:
-            uow_factory: Factory to create isolated UnitOfWork per thread
-            state_adapter_factory: Factory to create isolated StateAdapter per thread
+            controller_factory: Factory to create isolated ExecutionController (v1.7 preferred)
+            uow_factory: Legacy factory to create isolated UnitOfWork per thread
+            state_adapter_factory: Legacy factory to create isolated StateAdapter per thread
             max_workers: Maximum concurrent workers
             execution_timeout_seconds: Timeout for each variant execution
+            
+        Note:
+            If controller_factory is provided, uow_factory and state_adapter_factory
+            are ignored. The controller_factory approach is preferred for ACID compliance.
         """
+        self._controller_factory = controller_factory
         self._uow_factory = uow_factory
         self._state_adapter_factory = state_adapter_factory
         self._max_workers = max_workers
@@ -210,86 +260,43 @@ class ThreadPoolBatchTestRunner(IBatchTestRunner):
         workflow_id: str,
         combo: VariantCombination,
         initial_state: Dict[str, Any],
+        workflow_graph: Optional[Any] = None,
     ) -> BatchTestResult:
         """
         Execute a single variant combination.
         
-        Creates isolated dependencies (UoW, StateAdapter) for thread safety.
+        Refactored (v1.7): Uses ExecutionController for actual execution.
+        Creates isolated dependencies for thread safety and ACID compliance.
         
         Args:
             workflow_id: Workflow to execute
             combo: Variant combination to apply
             initial_state: Initial state for execution
+            workflow_graph: Optional pre-built LangGraph workflow
             
         Returns:
             BatchTestResult with execution outcome
+            
+        ACID Compliance:
+        - Atomicity: Entire execution in single transaction
+        - Consistency: Uses ExecutionController for unified execution path
+        - Isolation: Each call creates new UoW + controller
+        - Durability: Results persisted via UoW.commit()
         """
         start_time = time.time()
         execution_id = str(uuid.uuid4())
         
         try:
-            # Create isolated dependencies
-            uow = self._uow_factory()
-            state_adapter = self._state_adapter_factory()
+            # v1.7: Use controller factory if available (preferred)
+            if self._controller_factory is not None:
+                return self._execute_with_controller_factory(
+                    workflow_id, combo, initial_state, workflow_graph, start_time
+                )
             
-            with uow:
-                # Get workflow
-                workflow = uow.workflows.get(workflow_id)
-                if workflow is None:
-                    raise BatchRunnerExecutionError(
-                        f"Workflow {workflow_id} not found",
-                        batch_test_id="",
-                        failed_variant=combo.name,
-                    )
-                
-                # Create execution
-                execution = Execution(
-                    id=execution_id,
-                    workflow_id=workflow_id,
-                    initial_state=initial_state,
-                    metadata={
-                        "variant_combination": combo.to_dict(),
-                        "batch_test_variant": combo.name,
-                    },
-                )
-                
-                # Apply variants to workflow graph
-                modified_definition = self._apply_variants(
-                    workflow.definition,
-                    combo.variants,
-                )
-                
-                # Execute the workflow
-                # Note: This is a simplified execution loop
-                # Real implementation would use ExecutionController
-                execution.start()
-                
-                # Simulate execution (placeholder for real node execution)
-                # In production, this would:
-                # 1. Get the execution controller
-                # 2. Run through each node with variants applied
-                # 3. Track checkpoints via state_adapter
-                result_metrics = self._run_workflow_nodes(
-                    execution,
-                    modified_definition,
-                    state_adapter,
-                    uow,
-                )
-                
-                execution.complete({"result": "success"})
-                uow.executions.add(execution)
-                uow.commit()
-                
-                duration_ms = int((time.time() - start_time) * 1000)
-                
-                return BatchTestResult(
-                    combination_name=combo.name,
-                    execution_id=execution_id,
-                    success=True,
-                    duration_ms=duration_ms,
-                    metrics=result_metrics,
-                    overall_score=result_metrics.get("overall_score", 0.0),
-                )
+            # Legacy path: use uow_factory + state_adapter_factory
+            return self._execute_with_legacy_factories(
+                workflow_id, combo, initial_state, start_time, execution_id
+            )
                 
         except Exception as e:
             logger.error(f"Execution failed for {combo.name}: {e}")
@@ -303,60 +310,170 @@ class ThreadPoolBatchTestRunner(IBatchTestRunner):
                 error_message=str(e),
             )
     
-    def _apply_variants(
+    def _execute_with_controller_factory(
         self,
-        definition: Dict[str, Any],
-        variants: Dict[str, str],
-    ) -> Dict[str, Any]:
+        workflow_id: str,
+        combo: VariantCombination,
+        initial_state: Dict[str, Any],
+        workflow_graph: Optional[Any],
+        start_time: float,
+    ) -> BatchTestResult:
         """
-        Apply variant substitutions to workflow definition.
+        Execute variant using v1.7 controller factory pattern.
+        
+        ACID Compliance: Each execution gets isolated controller + UoW.
+        """
+        # Create isolated controller with its own UoW
+        with self._controller_factory() as managed:
+            controller = managed.controller
+            uow = managed.uow
+            
+            # Get workflow
+            workflow = uow.workflows.get(workflow_id)
+            if workflow is None:
+                raise BatchRunnerExecutionError(
+                    f"Workflow {workflow_id} not found",
+                    batch_test_id="",
+                    failed_variant=combo.name,
+                )
+            
+            # Apply variants to initial state
+            variant_state = initial_state.copy()
+            variant_state["_variant_config"] = combo.variants
+            variant_state["_variant_name"] = combo.name
+            
+            # Create and run execution via ExecutionController
+            execution = controller.create_execution(
+                workflow=workflow,
+                initial_state=variant_state,
+            )
+            
+            # Run execution (with optional graph for LangGraph execution)
+            execution = controller.run(execution.id, graph=workflow_graph)
+            
+            # Calculate metrics from execution state
+            result_metrics = self._extract_metrics(execution)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            success = execution.status == ExecutionStatus.COMPLETED
+            error_msg = execution.error_message if not success else None
+            
+            return BatchTestResult(
+                combination_name=combo.name,
+                execution_id=execution.id,
+                success=success,
+                duration_ms=duration_ms,
+                metrics=result_metrics,
+                overall_score=result_metrics.get("overall_score", 0.0),
+                error_message=error_msg,
+            )
+    
+    def _execute_with_legacy_factories(
+        self,
+        workflow_id: str,
+        combo: VariantCombination,
+        initial_state: Dict[str, Any],
+        start_time: float,
+        execution_id: str,
+    ) -> BatchTestResult:
+        """
+        Execute variant using legacy uow_factory + state_adapter_factory.
+        
+        Maintains backward compatibility with existing code.
+        """
+        if self._uow_factory is None or self._state_adapter_factory is None:
+            raise BatchRunnerError(
+                "Either controller_factory or (uow_factory + state_adapter_factory) required"
+            )
+        
+        # Create isolated dependencies
+        uow = self._uow_factory()
+        state_adapter = self._state_adapter_factory()
+        
+        with uow:
+            # Import here to avoid circular imports
+            from .execution_controller import ExecutionController, DefaultNodeExecutor
+            
+            # Get workflow
+            workflow = uow.workflows.get(workflow_id)
+            if workflow is None:
+                raise BatchRunnerExecutionError(
+                    f"Workflow {workflow_id} not found",
+                    batch_test_id="",
+                    failed_variant=combo.name,
+                )
+            
+            # Create controller for this execution
+            controller = ExecutionController(
+                execution_repository=uow.executions,
+                workflow_repository=uow.workflows,
+                state_adapter=state_adapter,
+                node_executor=DefaultNodeExecutor(),
+                unit_of_work=uow,
+            )
+            
+            # Apply variants to initial state
+            variant_state = initial_state.copy()
+            variant_state["_variant_config"] = combo.variants
+            variant_state["_variant_name"] = combo.name
+            
+            # Create and run execution
+            execution = controller.create_execution(
+                workflow=workflow,
+                initial_state=variant_state,
+            )
+            
+            execution = controller.run(execution.id)
+            
+            # Calculate metrics
+            result_metrics = self._extract_metrics(execution)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            success = execution.status == ExecutionStatus.COMPLETED
+            error_msg = execution.error_message if not success else None
+            
+            return BatchTestResult(
+                combination_name=combo.name,
+                execution_id=execution.id,
+                success=success,
+                duration_ms=duration_ms,
+                metrics=result_metrics,
+                overall_score=result_metrics.get("overall_score", 0.0),
+                error_message=error_msg,
+            )
+    
+    def _extract_metrics(self, execution: Execution) -> Dict[str, float]:
+        """
+        Extract metrics from completed execution.
         
         Args:
-            definition: Original workflow definition
-            variants: node_id -> variant_id mapping
+            execution: Completed execution
             
         Returns:
-            Modified workflow definition
+            Dictionary of metrics
         """
-        # Deep copy to avoid mutation
-        import copy
-        modified = copy.deepcopy(definition)
+        metrics: Dict[str, float] = {}
         
-        # Apply each variant
-        for node_id, variant_id in variants.items():
-            if "nodes" in modified and node_id in modified["nodes"]:
-                modified["nodes"][node_id]["variant_id"] = variant_id
+        # Extract from execution state
+        if execution.state and execution.state.workflow_variables:
+            vars = execution.state.workflow_variables
+            
+            # Common metric patterns
+            if "overall_score" in vars:
+                metrics["overall_score"] = float(vars["overall_score"])
+            if "accuracy" in vars:
+                metrics["accuracy"] = float(vars["accuracy"])
+            if "latency_ms" in vars:
+                metrics["latency_ms"] = float(vars["latency_ms"])
+            if "_metrics" in vars and isinstance(vars["_metrics"], dict):
+                metrics.update(vars["_metrics"])
         
-        return modified
-    
-    def _run_workflow_nodes(
-        self,
-        execution: Execution,
-        definition: Dict[str, Any],
-        state_adapter: IStateAdapter,
-        uow: IUnitOfWork,
-    ) -> Dict[str, float]:
-        """
-        Execute workflow nodes and collect metrics.
-        
-        This is a placeholder implementation. Real execution would:
-        1. Traverse the workflow graph
-        2. Execute each node with the appropriate variant
-        3. Track state via checkpoints
-        4. Collect evaluation metrics
-        
-        Returns:
-            Dictionary of collected metrics
-        """
-        # Placeholder: Return mock metrics
-        # In production, this integrates with ExecutionController
-        metrics = {
-            "overall_score": 0.8,
-            "latency_ms": 100.0,
-            "accuracy": 0.9,
-        }
+        # Default overall score if not present
+        if "overall_score" not in metrics:
+            metrics["overall_score"] = 1.0 if execution.status == ExecutionStatus.COMPLETED else 0.0
         
         return metrics
+    
     
     def get_status(self, batch_test_id: str) -> BatchRunnerStatus:
         """Get status of a batch test."""

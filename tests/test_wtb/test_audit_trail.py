@@ -214,27 +214,30 @@ class TestWTBAuditTrail:
         """CheckpointCreatedEvent is recorded correctly."""
         trail = WTBAuditTrail()
         
+        # Use new DDD-compliant event format (2026-01-15)
         event = CheckpointCreatedEvent(
             execution_id="exec-1",
-            checkpoint_id=42,
-            node_id="node-1",
-            is_auto=True,
+            checkpoint_id="cp-42",
+            step=1,
+            completed_node="node-1",
         )
         
         trail.record_event(event)
         
         entry = trail.entries[0]
         assert entry.event_type == WTBAuditEventType.CHECKPOINT_CREATED
-        assert "42" in entry.message
+        assert "cp-42" in entry.message
     
     def test_record_rollback_event(self):
         """RollbackPerformedEvent is recorded correctly."""
         trail = WTBAuditTrail()
         
+        # Use new DDD-compliant event format (2026-01-15)
         event = RollbackPerformedEvent(
             execution_id="exec-1",
-            to_checkpoint_id=10,
-            tools_reversed=3,
+            from_checkpoint_id="cp-20",
+            to_checkpoint_id="cp-10",
+            rolled_back_nodes=["node-2", "node-3", "node-4"],
         )
         
         trail.record_event(event)
@@ -242,7 +245,7 @@ class TestWTBAuditTrail:
         entry = trail.entries[0]
         assert entry.event_type == WTBAuditEventType.ROLLBACK_PERFORMED
         assert entry.severity == WTBAuditSeverity.WARNING
-        assert "3 tools reversed" in entry.message
+        assert "3 nodes reverted" in entry.message
     
     def test_flush_entries(self):
         """Can flush entries for persistence."""
@@ -301,7 +304,8 @@ class TestWTBAuditTrail:
         trail.record_event(ExecutionStartedEvent(execution_id="exec-1", workflow_id="wf-1"))
         trail.record_event(NodeCompletedEvent(execution_id="exec-1", node_id="n1", node_name="N1"))
         trail.record_event(NodeCompletedEvent(execution_id="exec-1", node_id="n2", node_name="N2"))
-        trail.record_event(CheckpointCreatedEvent(execution_id="exec-1", checkpoint_id=1))
+        # Use new DDD-compliant event format (2026-01-15)
+        trail.record_event(CheckpointCreatedEvent(execution_id="exec-1", checkpoint_id="cp-1", step=1))
         trail.record_event(NodeFailedEvent(execution_id="exec-1", node_id="n3", node_name="N3", error_message="E", error_type="T"))
         
         trail.ended_at = datetime.now()

@@ -293,15 +293,20 @@ class Execution:
     - Business logic is encapsulated within the entity
     - Services only coordinate and persist
     - Entity enforces its own invariants
+    
+    Refactored (v1.6):
+    - session_id: str (LangGraph thread_id, was agentgit_session_id: int)
+    - checkpoint_id: str (LangGraph checkpoint UUID, was agentgit_checkpoint_id: int)
+    - Session is a Domain concept (scope/context), maps 1:1 to LangGraph thread_id
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     workflow_id: str = ""
     status: ExecutionStatus = ExecutionStatus.PENDING
     state: ExecutionState = field(default_factory=ExecutionState)
     
-    # AgentGit integration
-    agentgit_session_id: Optional[int] = None
-    agentgit_checkpoint_id: Optional[int] = None
+    # Session & Checkpoint (v1.6: str IDs, maps to LangGraph thread_id/checkpoint_id)
+    session_id: Optional[str] = None
+    checkpoint_id: Optional[str] = None
     
     # Timing
     started_at: Optional[datetime] = None
@@ -603,8 +608,8 @@ class Execution:
             "workflow_id": self.workflow_id,
             "status": self.status.value,
             "state": self.state.to_dict(),
-            "agentgit_session_id": self.agentgit_session_id,
-            "agentgit_checkpoint_id": self.agentgit_checkpoint_id,
+            "session_id": self.session_id,
+            "checkpoint_id": self.checkpoint_id,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -617,13 +622,23 @@ class Execution:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Execution":
         """Deserialize execution from dictionary."""
+        # Support both old (agentgit_*) and new (session_id/checkpoint_id) field names
+        session_id = data.get("session_id") or data.get("agentgit_session_id")
+        checkpoint_id = data.get("checkpoint_id") or data.get("agentgit_checkpoint_id")
+        
+        # Convert legacy int IDs to str
+        if session_id is not None and isinstance(session_id, int):
+            session_id = str(session_id)
+        if checkpoint_id is not None and isinstance(checkpoint_id, int):
+            checkpoint_id = str(checkpoint_id)
+        
         execution = cls(
             id=data.get("id", str(uuid.uuid4())),
             workflow_id=data.get("workflow_id", ""),
             status=ExecutionStatus(data.get("status", "pending")),
             state=ExecutionState.from_dict(data.get("state", {})),
-            agentgit_session_id=data.get("agentgit_session_id"),
-            agentgit_checkpoint_id=data.get("agentgit_checkpoint_id"),
+            session_id=session_id,
+            checkpoint_id=checkpoint_id,
             error_message=data.get("error_message"),
             error_node_id=data.get("error_node_id"),
             breakpoints=data.get("breakpoints", []),

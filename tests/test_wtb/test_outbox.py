@@ -318,26 +318,25 @@ class TestOutboxWithUnitOfWork:
         assert uow.outbox is not None
     
     def test_atomic_business_data_and_outbox(self):
-        """Test that business data and outbox are written atomically."""
+        """Test that business data and outbox are written atomically (Updated 2026-01-15 for DDD compliance)."""
         uow = InMemoryUnitOfWork()
         
         with uow:
             # Simulate adding business data
             from wtb.domain.models import NodeBoundary
-            boundary = NodeBoundary(
+            boundary = NodeBoundary.create_for_node(
                 execution_id="exec-1",
-                internal_session_id=1,
                 node_id="train",
-                entry_checkpoint_id=42
             )
+            boundary.start(entry_checkpoint_id="cp-042")
             uow.node_boundaries.add(boundary)
             
             # Add outbox event in same transaction
             event = OutboxEvent.create_checkpoint_verify(
                 execution_id="exec-1",
-                checkpoint_id=42,
+                checkpoint_id="cp-042",
                 node_id="train",
-                internal_session_id=1,
+                internal_session_id=0,  # Legacy field - not used in DDD model
                 is_entry=True
             )
             uow.outbox.add(event)
@@ -396,4 +395,270 @@ class TestOutboxProcessor:
         processor.start()  # Should not raise
         
         processor.stop()
+    
+    def test_processor_stats(self):
+        """Test processor statistics tracking."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        processor = OutboxProcessor(wtb_db_url="sqlite:///:memory:")
+        
+        stats = processor.get_stats()
+        
+        assert "events_processed" in stats
+        assert "events_failed" in stats
+        assert "checkpoints_verified" in stats
+        assert "commits_verified" in stats
+        assert "blobs_verified" in stats
+        
+        # Reset and verify
+        processor.reset_stats()
+        stats = processor.get_stats()
+        assert all(v == 0 for v in stats.values())
+
+
+class TestOutboxFileTrackerVerification:
+    """Tests for FileTracker verification in OutboxProcessor."""
+    
+    @pytest.fixture
+    def mock_commit_repo(self):
+        """Create a mock commit repository."""
+        class MockCommitRepository:
+            def __init__(self):
+                self.commits = {}
+            
+            def add_commit(self, commit_id, mementos=None):
+                commit = type('Commit', (), {
+                    '_commit_id': commit_id,
+                    '_mementos': mementos or [],
+                })()
+                self.commits[commit_id] = commit
+            
+            def find_by_id(self, commit_id):
+                return self.commits.get(commit_id)
+        
+        return MockCommitRepository()
+    
+    @pytest.fixture
+    def mock_blob_repo(self):
+        """Create a mock blob repository."""
+        class MockBlobRepository:
+            def __init__(self):
+                self.blobs = set()
+            
+            def add_blob(self, file_hash):
+                self.blobs.add(file_hash)
+            
+            def exists(self, content_hash):
+                return content_hash in self.blobs
+        
+        return MockBlobRepository()
+    
+    @pytest.fixture
+    def mock_checkpoint_repo(self):
+        """Create a mock checkpoint repository."""
+        class MockCheckpointRepository:
+            def __init__(self):
+                self.checkpoints = {}
+            
+            def add_checkpoint(self, checkpoint_id, metadata=None):
+                cp = type('Checkpoint', (), {
+                    'id': checkpoint_id,
+                    'metadata': metadata or {},
+                })()
+                self.checkpoints[checkpoint_id] = cp
+            
+            def get_by_id(self, checkpoint_id):
+                return self.checkpoints.get(checkpoint_id)
+        
+        return MockCheckpointRepository()
+    
+    def test_file_commit_verify_with_repo(self, mock_commit_repo):
+        """Test file commit verification with repository."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        # Add a commit to the mock repo
+        mock_commit_repo.add_commit("commit-123", mementos=[])
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            commit_repo=mock_commit_repo,
+        )
+        
+        # Create verification event
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_COMMIT_VERIFY,
+            payload={"file_commit_id": "commit-123"}
+        )
+        
+        # Should not raise
+        processor._handle_file_commit_verify(event)
+        
+        # Stats should be updated
+        assert processor.get_stats()["commits_verified"] == 1
+    
+    def test_file_commit_verify_not_found(self, mock_commit_repo):
+        """Test file commit verification when commit not found."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            commit_repo=mock_commit_repo,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_COMMIT_VERIFY,
+            payload={"file_commit_id": "nonexistent"}
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            processor._handle_file_commit_verify(event)
+        
+        assert "not found" in str(exc_info.value)
+    
+    def test_file_blob_verify_with_repo(self, mock_blob_repo):
+        """Test file blob verification with repository."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        # Add a blob to the mock repo
+        mock_blob_repo.add_blob("abc123def456")
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            blob_repo=mock_blob_repo,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_BLOB_VERIFY,
+            payload={"file_hash": "abc123def456", "file_path": "test.txt"}
+        )
+        
+        # Should not raise
+        processor._handle_file_blob_verify(event)
+        
+        # Stats should be updated
+        assert processor.get_stats()["blobs_verified"] == 1
+    
+    def test_file_blob_verify_not_found(self, mock_blob_repo):
+        """Test file blob verification when blob not found."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            blob_repo=mock_blob_repo,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_BLOB_VERIFY,
+            payload={"file_hash": "nonexistent"}
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            processor._handle_file_blob_verify(event)
+        
+        assert "not found" in str(exc_info.value)
+    
+    def test_verification_without_repos_non_strict(self):
+        """Test verification skips gracefully when repos not configured."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            strict_verification=False,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_COMMIT_VERIFY,
+            payload={"file_commit_id": "any-id"}
+        )
+        
+        # Should not raise - just logs warning
+        processor._handle_file_commit_verify(event)
+        
+        # No commits verified since repo is None
+        assert processor.get_stats()["commits_verified"] == 0
+    
+    def test_verification_without_repos_strict(self):
+        """Test verification raises when repos not configured and strict=True."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            strict_verification=True,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.FILE_COMMIT_VERIFY,
+            payload={"file_commit_id": "any-id"}
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            processor._handle_file_commit_verify(event)
+        
+        assert "not configured" in str(exc_info.value)
+    
+    def test_checkpoint_verify_with_repo(self, mock_checkpoint_repo):
+        """Test checkpoint verification with repository."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        mock_checkpoint_repo.add_checkpoint(42, {"node_id": "test"})
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            checkpoint_repo=mock_checkpoint_repo,
+        )
+        
+        event = OutboxEvent(
+            event_type=OutboxEventType.CHECKPOINT_VERIFY,
+            payload={"checkpoint_id": 42, "node_id": "test"}
+        )
+        
+        # Should not raise
+        processor._handle_checkpoint_verify(event)
+        
+        assert processor.get_stats()["checkpoints_verified"] == 1
+    
+    def test_full_cross_db_verification(
+        self, mock_checkpoint_repo, mock_commit_repo, mock_blob_repo
+    ):
+        """Test full cross-database verification."""
+        from wtb.infrastructure.outbox.processor import OutboxProcessor
+        
+        # Setup mock data
+        mock_checkpoint_repo.add_checkpoint(42)
+        
+        # Create memento mock
+        memento = type('Memento', (), {'_file_hash': 'blob-hash-1'})()
+        mock_commit_repo.add_commit("commit-abc", mementos=[memento])
+        mock_blob_repo.add_blob("blob-hash-1")
+        
+        processor = OutboxProcessor(
+            wtb_db_url="sqlite:///:memory:",
+            checkpoint_repo=mock_checkpoint_repo,
+            commit_repo=mock_commit_repo,
+            blob_repo=mock_blob_repo,
+        )
+        
+        # Note: This test is limited because we can't easily mock the WTB UoW
+        # In a real integration test, we'd setup the full checkpoint_files link
+        
+        # Test individual handlers work together
+        processor._handle_checkpoint_create(OutboxEvent(
+            event_type=OutboxEventType.CHECKPOINT_CREATE,
+            payload={"checkpoint_id": 42}
+        ))
+        
+        processor._handle_file_commit_verify(OutboxEvent(
+            event_type=OutboxEventType.FILE_COMMIT_VERIFY,
+            payload={"file_commit_id": "commit-abc"}
+        ))
+        
+        processor._handle_file_blob_verify(OutboxEvent(
+            event_type=OutboxEventType.FILE_BLOB_VERIFY,
+            payload={"file_hash": "blob-hash-1"}
+        ))
+        
+        stats = processor.get_stats()
+        assert stats["checkpoints_verified"] == 1
+        assert stats["commits_verified"] == 1
+        assert stats["blobs_verified"] == 1
 

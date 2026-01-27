@@ -2,6 +2,11 @@
 Unit tests for ExecutionController.
 
 Tests the main workflow execution orchestration.
+
+Quality Improvements (2026-01-16):
+- Added contextual assertion helpers
+- One-shot breakpoint semantic testing
+- Better error messages for debugging
 """
 
 import pytest
@@ -18,6 +23,12 @@ from wtb.domain.models import (
 from wtb.domain.interfaces.repositories import IExecutionRepository, IWorkflowRepository
 from wtb.infrastructure.adapters.inmemory_state_adapter import InMemoryStateAdapter
 from wtb.application.services.execution_controller import ExecutionController, DefaultNodeExecutor
+
+# Test helpers for better assertions
+from tests.helpers.assertions import (
+    assert_execution_completed,
+    assert_execution_paused,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +114,10 @@ class MockWorkflowRepository(IWorkflowRepository):
     
     def exists(self, id: str) -> bool:
         return id in self._storage
+    
+    def list_all(self) -> List[TestWorkflow]:
+        """List all workflows without pagination."""
+        return list(self._storage.values())
     
     def find_by_name(self, name: str) -> Optional[TestWorkflow]:
         for w in self._storage.values():
@@ -201,7 +216,7 @@ class TestExecutionController:
         assert execution.workflow_id == workflow.id
         assert execution.status == ExecutionStatus.PENDING
         assert execution.state.current_node_id == "start"
-        assert execution.agentgit_session_id is not None
+        assert execution.session_id is not None
         assert exec_repo.exists(execution.id)
     
     def test_create_execution_with_initial_state(self, controller):
@@ -280,11 +295,13 @@ class TestExecutionController:
         workflow_repo.add(workflow)
         
         execution = ctrl.create_execution(workflow, breakpoints=["action"])
-        ctrl.run(execution.id)
+        paused = ctrl.run(execution.id)
         
-        # Remove breakpoint and resume
-        execution.breakpoints.remove("action")
-        completed = ctrl.resume(execution.id)
+        # Breakpoint is auto-removed after triggering (one-shot semantic)
+        assert "action" not in paused.breakpoints, "Breakpoint should be removed after triggering"
+        
+        # Resume - breakpoint won't trigger again since it was already removed
+        completed = ctrl.resume(paused.id)
         
         assert completed.status == ExecutionStatus.COMPLETED
     
@@ -359,7 +376,7 @@ class TestExecutionController:
         ctrl.run(execution.id)  # Pauses at action
         
         # Get checkpoint before action
-        session_id = execution.agentgit_session_id
+        session_id = execution.session_id
         checkpoints = state_adapter.get_checkpoints(session_id)
         
         # Remove breakpoint and run to completion
@@ -390,7 +407,7 @@ class TestExecutionController:
             execution.id,
             ExecutionState(current_node_id="start")
         )
-        execution.agentgit_session_id = session_id
+        execution.session_id = session_id
         exec_repo.add(execution)
         
         with pytest.raises(ValueError, match="not found"):

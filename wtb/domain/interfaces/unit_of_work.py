@@ -16,10 +16,10 @@ if TYPE_CHECKING:
         IBatchTestRepository,
         IEvaluationResultRepository,
         INodeBoundaryRepository,
-        ICheckpointFileRepository,
         IOutboxRepository,
         IAuditLogRepository,
     )
+    from .file_processing_repository import ICheckpointFileLinkRepository
 
 
 class IUnitOfWork(ABC):
@@ -53,7 +53,7 @@ class IUnitOfWork(ABC):
     
     # WTB-Specific Repositories (Anti-Corruption Layer)
     node_boundaries: "INodeBoundaryRepository"
-    checkpoint_files: "ICheckpointFileRepository"
+    checkpoint_file_links: "ICheckpointFileLinkRepository"  # 2026-01-27: Renamed from checkpoint_files
     
     # Outbox Pattern (for cross-database consistency)
     outbox: "IOutboxRepository"

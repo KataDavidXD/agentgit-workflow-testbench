@@ -22,6 +22,7 @@ from wtb.domain.interfaces.batch_runner import (
     BatchRunnerError,
 )
 from wtb.application.services.batch_test_runner import ThreadPoolBatchTestRunner
+from wtb.application.services.ray_batch_runner import RAY_AVAILABLE
 from wtb.config import RayConfig
 from wtb.application.factories import BatchTestRunnerFactory
 from wtb.infrastructure.database import InMemoryUnitOfWork
@@ -299,8 +300,8 @@ class TestRayBatchTestRunner:
         assert isinstance(available, bool)
     
     @pytest.mark.skipif(
-        True,  # Skip Ray tests in CI
-        reason="Ray not installed in test environment"
+        not RAY_AVAILABLE,
+        reason="Ray not installed"
     )
     def test_create_ray_runner(self):
         """Can create Ray runner (requires Ray)."""

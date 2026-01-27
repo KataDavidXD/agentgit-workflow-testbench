@@ -43,6 +43,11 @@ class BaseRepository(Generic[T, ORM]):
         )
         return [self._to_domain(orm) for orm in orms]
     
+    def list_all(self) -> List[T]:
+        """List all entities without pagination. Use sparingly."""
+        orms = self._session.query(self._orm_class).all()
+        return [self._to_domain(orm) for orm in orms]
+    
     def exists(self, id: str) -> bool:
         """Check if entity exists."""
         return (

@@ -1,4 +1,11 @@
-"""Node boundary repository implementation."""
+"""
+Node boundary repository implementation.
+
+Updated 2026-01-15 for DDD compliance:
+- Changed from internal_session_id to execution_id
+- Removed tool_count and checkpoint_count
+- Uses CheckpointId value object for checkpoint references
+"""
 
 import json
 from typing import Optional, List
@@ -6,11 +13,18 @@ from sqlalchemy.orm import Session
 
 from wtb.domain.interfaces.repositories import INodeBoundaryRepository
 from wtb.domain.models import NodeBoundary
+from wtb.domain.models.checkpoint import CheckpointId
 from ..models import NodeBoundaryORM
 
 
 class NodeBoundaryRepository(INodeBoundaryRepository):
-    """SQLAlchemy implementation of node boundary repository."""
+    """
+    SQLAlchemy implementation of node boundary repository.
+    
+    Updated 2026-01-15 for DDD compliance:
+    - Changed from internal_session_id to execution_id based queries
+    - Handles CheckpointId value objects
+    """
     
     def __init__(self, session: Session):
         self._session = session
@@ -19,18 +33,19 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
         """Convert ORM to domain model."""
         error_details = json.loads(orm.error_details) if orm.error_details else None
         
+        # Handle checkpoint_id conversion (ORM stores as string)
+        entry_cp_id = CheckpointId(str(orm.entry_checkpoint_id)) if orm.entry_checkpoint_id else None
+        exit_cp_id = CheckpointId(str(orm.exit_checkpoint_id)) if orm.exit_checkpoint_id else None
+        
         return NodeBoundary(
             id=orm.id,
             execution_id=orm.execution_id,
-            internal_session_id=orm.internal_session_id,
             node_id=orm.node_id,
-            entry_checkpoint_id=orm.entry_checkpoint_id,
-            exit_checkpoint_id=orm.exit_checkpoint_id,
+            entry_checkpoint_id=entry_cp_id,
+            exit_checkpoint_id=exit_cp_id,
             node_status=orm.node_status,
             started_at=orm.started_at,
             completed_at=orm.completed_at,
-            tool_count=orm.tool_count,
-            checkpoint_count=orm.checkpoint_count,
             duration_ms=orm.duration_ms,
             error_message=orm.error_message,
             error_details=error_details,
@@ -38,18 +53,22 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
     
     def _to_orm(self, domain: NodeBoundary) -> NodeBoundaryORM:
         """Convert domain model to ORM."""
+        # Handle checkpoint_id conversion (domain uses CheckpointId, ORM stores string/int)
+        entry_cp = str(domain.entry_checkpoint_id) if domain.entry_checkpoint_id else None
+        exit_cp = str(domain.exit_checkpoint_id) if domain.exit_checkpoint_id else None
+        
         return NodeBoundaryORM(
             id=domain.id,
             execution_id=domain.execution_id,
-            internal_session_id=domain.internal_session_id,
+            internal_session_id=0,  # Legacy field - kept for schema compatibility
             node_id=domain.node_id,
-            entry_checkpoint_id=domain.entry_checkpoint_id,
-            exit_checkpoint_id=domain.exit_checkpoint_id,
+            entry_checkpoint_id=entry_cp,
+            exit_checkpoint_id=exit_cp,
             node_status=domain.node_status,
             started_at=domain.started_at,
             completed_at=domain.completed_at,
-            tool_count=domain.tool_count,
-            checkpoint_count=domain.checkpoint_count,
+            tool_count=0,  # Legacy field - kept for schema compatibility
+            checkpoint_count=0,  # Legacy field - kept for schema compatibility
             duration_ms=domain.duration_ms,
             error_message=domain.error_message,
             error_details=json.dumps(domain.error_details) if domain.error_details else None,
@@ -89,11 +108,11 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
         """Update existing entity."""
         orm = self._session.query(NodeBoundaryORM).filter_by(id=entity.id).first()
         if orm:
-            orm.exit_checkpoint_id = entity.exit_checkpoint_id
+            # Handle checkpoint_id conversion
+            orm.exit_checkpoint_id = str(entity.exit_checkpoint_id) if entity.exit_checkpoint_id else None
+            orm.entry_checkpoint_id = str(entity.entry_checkpoint_id) if entity.entry_checkpoint_id else None
             orm.node_status = entity.node_status
             orm.completed_at = entity.completed_at
-            orm.tool_count = entity.tool_count
-            orm.checkpoint_count = entity.checkpoint_count
             orm.duration_ms = entity.duration_ms
             orm.error_message = entity.error_message
             orm.error_details = json.dumps(entity.error_details) if entity.error_details else None
@@ -109,8 +128,45 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
             return True
         return False
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # New DDD-compliant methods (2026-01-15)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def find_by_execution(self, execution_id: str) -> List[NodeBoundary]:
+        """Find all boundaries for an execution."""
+        orms = (
+            self._session.query(NodeBoundaryORM)
+            .filter_by(execution_id=execution_id)
+            .order_by(NodeBoundaryORM.started_at)
+            .all()
+        )
+        return [self._to_domain(orm) for orm in orms]
+    
+    def find_by_execution_and_node(self, execution_id: str, node_id: str) -> Optional[NodeBoundary]:
+        """Find boundary for a specific node in an execution."""
+        orm = (
+            self._session.query(NodeBoundaryORM)
+            .filter_by(execution_id=execution_id, node_id=node_id)
+            .first()
+        )
+        return self._to_domain(orm) if orm else None
+    
+    def find_completed_by_execution(self, execution_id: str) -> List[NodeBoundary]:
+        """Find completed node boundaries for an execution."""
+        orms = (
+            self._session.query(NodeBoundaryORM)
+            .filter_by(execution_id=execution_id, node_status='completed')
+            .order_by(NodeBoundaryORM.completed_at)
+            .all()
+        )
+        return [self._to_domain(orm) for orm in orms]
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Legacy methods (deprecated, kept for backward compatibility)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
     def find_by_session(self, internal_session_id: int) -> List[NodeBoundary]:
-        """Find all boundaries for a session."""
+        """DEPRECATED: Use find_by_execution() instead."""
         orms = (
             self._session.query(NodeBoundaryORM)
             .filter_by(internal_session_id=internal_session_id)
@@ -120,7 +176,7 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
         return [self._to_domain(orm) for orm in orms]
     
     def find_by_node(self, internal_session_id: int, node_id: str) -> Optional[NodeBoundary]:
-        """Find boundary for a specific node."""
+        """DEPRECATED: Use find_by_execution_and_node() instead."""
         orm = (
             self._session.query(NodeBoundaryORM)
             .filter_by(internal_session_id=internal_session_id, node_id=node_id)
@@ -129,7 +185,7 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
         return self._to_domain(orm) if orm else None
     
     def find_completed(self, internal_session_id: int) -> List[NodeBoundary]:
-        """Find completed node boundaries."""
+        """DEPRECATED: Use find_completed_by_execution() instead."""
         orms = (
             self._session.query(NodeBoundaryORM)
             .filter_by(internal_session_id=internal_session_id, node_status='completed')
@@ -137,4 +193,3 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
             .all()
         )
         return [self._to_domain(orm) for orm in orms]
-

@@ -14,9 +14,10 @@ from wtb.domain.models import (
     ExecutionStatus,
     ExecutionState,
     NodeBoundary,
-    CheckpointFile,
+    CheckpointFileLink,
     InvalidStateTransition,
 )
+from wtb.domain.models.file_processing import CommitId
 from wtb.domain.models.outbox import (
     OutboxEvent,
     OutboxEventType,
@@ -35,25 +36,24 @@ class TestOutboxPatternIntegration:
     """Integration tests for the Outbox Pattern."""
     
     def test_atomic_boundary_and_outbox_creation(self):
-        """Test that node boundary and outbox event are created atomically."""
+        """Test that node boundary and outbox event are created atomically (Updated 2026-01-15 for DDD compliance)."""
         uow = InMemoryUnitOfWork()
         
         with uow:
             # Create node boundary
-            boundary = NodeBoundary(
+            boundary = NodeBoundary.create_for_node(
                 execution_id="exec-1",
-                internal_session_id=1,
                 node_id="train",
-                entry_checkpoint_id=42
             )
+            boundary.start(entry_checkpoint_id="cp-042")
             uow.node_boundaries.add(boundary)
             
             # Create corresponding outbox event
             event = OutboxEvent.create_checkpoint_verify(
                 execution_id="exec-1",
-                checkpoint_id=42,
+                checkpoint_id="cp-042",
                 node_id="train",
-                internal_session_id=1,
+                internal_session_id=0,  # Legacy field - not used in DDD model
                 is_entry=True
             )
             uow.outbox.add(event)
@@ -68,7 +68,7 @@ class TestOutboxPatternIntegration:
         assert len(events) == 1
         
         # Verify relationship
-        assert events[0].payload["checkpoint_id"] == boundaries[0].entry_checkpoint_id
+        assert events[0].payload["checkpoint_id"] == boundary.entry_checkpoint_id
     
     def test_file_commit_link_with_outbox(self):
         """Test file commit linking with outbox verification event."""
@@ -76,13 +76,13 @@ class TestOutboxPatternIntegration:
         
         with uow:
             # Create checkpoint file link
-            link = CheckpointFile(
+            link = CheckpointFileLink.create_from_values(
                 checkpoint_id=42,
-                file_commit_id="fc-abc-123",
+                commit_id=CommitId("fc-abc-123-1234-1234-1234-123456789012"),
                 file_count=3,
                 total_size_bytes=1024
             )
-            uow.checkpoint_files.add(link)
+            uow.checkpoint_file_links.add(link)
             
             # Create verification outbox event
             event = OutboxEvent.create_checkpoint_file_link_verify(
@@ -95,7 +95,7 @@ class TestOutboxPatternIntegration:
             uow.commit()
         
         # Verify both exist
-        links = uow.checkpoint_files.list()
+        links = uow.checkpoint_file_links.list_all()
         events = uow.outbox.get_pending()
         
         assert len(links) == 1
@@ -312,18 +312,16 @@ class TestEndToEndConsistency:
             uow.executions.add(execution)
             uow.commit()
         
-        # Step 2: Simulate node execution with checkpoint
-        checkpoint_id = 42  # Would come from AgentGit
+        # Step 2: Simulate node execution with checkpoint (Updated 2026-01-15 for DDD compliance)
+        checkpoint_id = "cp-042"  # Would come from LangGraph checkpointer
         
         with uow:
             # Create node boundary
-            boundary = NodeBoundary(
+            boundary = NodeBoundary.create_for_node(
                 execution_id=execution.id,
-                internal_session_id=1,
                 node_id="train",
-                entry_checkpoint_id=checkpoint_id,
-                node_status="started"
             )
+            boundary.start(entry_checkpoint_id=checkpoint_id)
             uow.node_boundaries.add(boundary)
             
             # Create outbox event for verification
@@ -331,7 +329,7 @@ class TestEndToEndConsistency:
                 execution_id=execution.id,
                 checkpoint_id=checkpoint_id,
                 node_id="train",
-                internal_session_id=1,
+                internal_session_id=0,  # Legacy field - not used in DDD model
                 is_entry=True
             )
             uow.outbox.add(event)
@@ -343,13 +341,11 @@ class TestEndToEndConsistency:
         execution.record_node_result("train", {"model_path": "/models/v1"})
         
         # Step 4: Complete node with exit checkpoint
-        exit_checkpoint_id = 43
+        exit_checkpoint_id = "cp-043"
         
         with uow:
-            boundary = uow.node_boundaries.find_by_node(1, "train")
-            boundary.exit_checkpoint_id = exit_checkpoint_id
-            boundary.node_status = "completed"
-            boundary.completed_at = datetime.now()
+            boundary = uow.node_boundaries.find_by_execution_and_node(execution.id, "train")
+            boundary.complete(exit_checkpoint_id=exit_checkpoint_id)
             uow.node_boundaries.update(boundary)
             
             # Another outbox event for exit
@@ -364,8 +360,8 @@ class TestEndToEndConsistency:
             
             uow.commit()
         
-        # Verify final state
-        boundaries = uow.node_boundaries.find_by_session(1)
+        # Verify final state (Updated 2026-01-15 - use execution_id instead of session_id)
+        boundaries = uow.node_boundaries.find_by_execution(execution.id)
         events = uow.outbox.list_all()
         
         assert len(boundaries) == 1
@@ -379,17 +375,17 @@ class TestEndToEndConsistency:
         
         # Simulate saving model file with checkpoint
         checkpoint_id = 100
-        file_commit_id = "commit-model-v1"
+        file_commit_id = CommitId.generate()
         
         with uow:
             # Link checkpoint to file commit
-            link = CheckpointFile(
+            link = CheckpointFileLink.create_from_values(
                 checkpoint_id=checkpoint_id,
-                file_commit_id=file_commit_id,
+                commit_id=file_commit_id,
                 file_count=1,
                 total_size_bytes=50 * 1024 * 1024  # 50MB
             )
-            uow.checkpoint_files.add(link)
+            uow.checkpoint_file_links.add(link)
             
             # Outbox event for file verification
             event = OutboxEvent.create_file_commit_verify(
@@ -403,9 +399,10 @@ class TestEndToEndConsistency:
             uow.commit()
         
         # Verify
-        link = uow.checkpoint_files.find_by_checkpoint(checkpoint_id)
+        link = uow.checkpoint_file_links.get_by_checkpoint(checkpoint_id)
         assert link is not None
-        assert link.file_commit_id == file_commit_id
+        # v1.6: commit_id is a CommitId value object, compare values
+        assert link.commit_id.value == file_commit_id.value
         
         events = uow.outbox.get_pending()
         assert len(events) == 1
