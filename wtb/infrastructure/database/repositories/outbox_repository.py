@@ -2,17 +2,19 @@
 SQLAlchemy Outbox Repository Implementation.
 
 Implements IOutboxRepository for persistent outbox event storage.
+
+Updated: 2026-01-28 - Refactored to use OutboxMapper for shared logic (ISSUE-FS-002)
 """
 
 from typing import Optional, List
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-import json
 
 from wtb.domain.models.outbox import OutboxEvent, OutboxEventType, OutboxStatus
 from wtb.domain.interfaces.repositories import IOutboxRepository
 from wtb.infrastructure.database.models import OutboxEventORM
+from wtb.infrastructure.database.mappers import OutboxMapper
 
 
 class SQLAlchemyOutboxRepository(IOutboxRepository):
@@ -21,44 +23,21 @@ class SQLAlchemyOutboxRepository(IOutboxRepository):
     
     Stores outbox events in wtb_outbox table for cross-database
     transaction consistency via the Outbox Pattern.
+    
+    DRY: Uses shared OutboxMapper for domain ↔ ORM conversion.
     """
     
     def __init__(self, session: Session):
         self._session = session
     
     def _to_domain(self, orm: OutboxEventORM) -> OutboxEvent:
-        """Convert ORM model to domain model."""
-        return OutboxEvent(
-            id=orm.id,
-            event_id=orm.event_id,
-            event_type=OutboxEventType(orm.event_type),
-            aggregate_type=orm.aggregate_type,
-            aggregate_id=orm.aggregate_id,
-            payload=json.loads(orm.payload) if orm.payload else {},
-            status=OutboxStatus(orm.status),
-            retry_count=orm.retry_count,
-            max_retries=orm.max_retries,
-            created_at=orm.created_at,
-            processed_at=orm.processed_at,
-            last_error=orm.last_error,
-        )
+        """Convert ORM model to domain model using shared mapper."""
+        return OutboxMapper.to_domain(orm)
     
     def _to_orm(self, event: OutboxEvent) -> OutboxEventORM:
-        """Convert domain model to ORM model."""
-        return OutboxEventORM(
-            id=event.id,
-            event_id=event.event_id,
-            event_type=event.event_type.value,
-            aggregate_type=event.aggregate_type,
-            aggregate_id=event.aggregate_id,
-            payload=json.dumps(event.payload),
-            status=event.status.value,
-            retry_count=event.retry_count,
-            max_retries=event.max_retries,
-            created_at=event.created_at,
-            processed_at=event.processed_at,
-            last_error=event.last_error,
-        )
+        """Convert domain model to ORM model using shared mapper."""
+        orm_dict = OutboxMapper.to_orm_dict(event)
+        return OutboxEventORM(**orm_dict)
     
     def add(self, event: OutboxEvent) -> OutboxEvent:
         """Add a new outbox event."""

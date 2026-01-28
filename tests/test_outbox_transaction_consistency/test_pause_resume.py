@@ -290,7 +290,7 @@ class TestPauseResumeACIDCompliance:
                 with lock:
                     results.append(result)
             except Exception as e:
-            with lock:
+                with lock:
                     errors.append((i, str(e)))
         
         # Run multiple executions concurrently

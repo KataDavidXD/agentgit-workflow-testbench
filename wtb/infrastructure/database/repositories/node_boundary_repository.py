@@ -4,7 +4,13 @@ Node boundary repository implementation.
 Updated 2026-01-15 for DDD compliance:
 - Changed from internal_session_id to execution_id
 - Removed tool_count and checkpoint_count
-- Uses CheckpointId value object for checkpoint references
+- Checkpoint IDs are Optional[str] (LangGraph UUID format)
+
+Updated 2026-01-28 (ARCHITECTURE_REVIEW - ISSUE-CP-002):
+- Fixed: Now passes string checkpoint IDs to domain model
+- Domain model expects Optional[str], not CheckpointId objects
+- Use get_entry_checkpoint_id_value() / get_exit_checkpoint_id_value()
+  on the domain model if you need CheckpointId value objects
 """
 
 import json
@@ -13,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from wtb.domain.interfaces.repositories import INodeBoundaryRepository
 from wtb.domain.models import NodeBoundary
-from wtb.domain.models.checkpoint import CheckpointId
 from ..models import NodeBoundaryORM
 
 
@@ -23,19 +28,29 @@ class NodeBoundaryRepository(INodeBoundaryRepository):
     
     Updated 2026-01-15 for DDD compliance:
     - Changed from internal_session_id to execution_id based queries
-    - Handles CheckpointId value objects
+    - Checkpoint IDs are stored and returned as strings
+    
+    Updated 2026-01-28:
+    - Fixed type mismatch: returns str checkpoint IDs, not CheckpointId
     """
     
     def __init__(self, session: Session):
         self._session = session
     
     def _to_domain(self, orm: NodeBoundaryORM) -> NodeBoundary:
-        """Convert ORM to domain model."""
+        """
+        Convert ORM to domain model.
+        
+        Note: Checkpoint IDs are passed as strings (Optional[str]).
+        Use domain model's get_entry_checkpoint_id_value() / get_exit_checkpoint_id_value()
+        methods if you need CheckpointId value objects.
+        """
         error_details = json.loads(orm.error_details) if orm.error_details else None
         
-        # Handle checkpoint_id conversion (ORM stores as string)
-        entry_cp_id = CheckpointId(str(orm.entry_checkpoint_id)) if orm.entry_checkpoint_id else None
-        exit_cp_id = CheckpointId(str(orm.exit_checkpoint_id)) if orm.exit_checkpoint_id else None
+        # 2026-01-28 FIX: Pass strings directly, not CheckpointId objects
+        # Domain model expects Optional[str] for entry/exit checkpoint IDs
+        entry_cp_id: Optional[str] = str(orm.entry_checkpoint_id) if orm.entry_checkpoint_id else None
+        exit_cp_id: Optional[str] = str(orm.exit_checkpoint_id) if orm.exit_checkpoint_id else None
         
         return NodeBoundary(
             id=orm.id,

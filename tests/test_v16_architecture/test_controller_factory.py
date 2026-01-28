@@ -117,14 +117,21 @@ class TestExecutionControllerFactoryIsolation:
         config = WTBConfig.for_testing()
         factory_callable = ExecutionControllerFactory.get_factory_callable(config)
         
-        # Act - Simulate batch execution with multiple calls
-        controller_ids = []
-        uow_ids = []
-        
+        # Act - Create all instances first, keeping references alive
+        # This prevents Python from reusing memory addresses after garbage collection
+        managed_instances = []
         for _ in range(3):
-            with factory_callable() as managed:
-                controller_ids.append(id(managed.controller))
-                uow_ids.append(id(managed.uow))
+            managed = factory_callable()
+            managed.__enter__()  # Enter context
+            managed_instances.append(managed)
+        
+        # Collect IDs while all instances are alive
+        controller_ids = [id(m.controller) for m in managed_instances]
+        uow_ids = [id(m.uow) for m in managed_instances]
+        
+        # Cleanup - exit contexts in reverse order
+        for managed in reversed(managed_instances):
+            managed.__exit__(None, None, None)
         
         # Assert - All different instances (isolation)
         assert len(set(controller_ids)) == 3, "Controllers should be different instances"

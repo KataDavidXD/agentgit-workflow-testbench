@@ -84,6 +84,40 @@ except ImportError:
     capture_graph_structure = None
     LANGGRAPH_NODE_REPLACER_AVAILABLE = False
 
+# Async execution controller (v2.0)
+try:
+    from .async_execution_controller import (
+        AsyncExecutionController,
+        AsyncExecutionControllerFactory,
+        AsyncExecutionResult,
+        AsyncStreamEvent,
+    )
+    ASYNC_EXECUTION_AVAILABLE = True
+except ImportError:
+    AsyncExecutionController = None
+    AsyncExecutionControllerFactory = None
+    AsyncExecutionResult = None
+    AsyncStreamEvent = None
+    ASYNC_EXECUTION_AVAILABLE = False
+
+# API Services (v2.0 - 2026-01-28)
+try:
+    from .api_services import (
+        ExecutionAPIService,
+        AuditAPIService,
+        BatchTestAPIService,
+        WorkflowAPIService,
+        APIServiceFactory,
+    )
+    API_SERVICES_AVAILABLE = True
+except ImportError:
+    ExecutionAPIService = None
+    AuditAPIService = None
+    BatchTestAPIService = None
+    WorkflowAPIService = None
+    APIServiceFactory = None
+    API_SERVICES_AVAILABLE = False
+
 __all__ = [
     # Core services
     "ExecutionController",
@@ -115,4 +149,17 @@ __all__ = [
     "VariantSet",
     "capture_graph_structure",
     "LANGGRAPH_NODE_REPLACER_AVAILABLE",
+    # Async execution (v2.0)
+    "AsyncExecutionController",
+    "AsyncExecutionControllerFactory",
+    "AsyncExecutionResult",
+    "AsyncStreamEvent",
+    "ASYNC_EXECUTION_AVAILABLE",
+    # API Services (v2.0)
+    "ExecutionAPIService",
+    "AuditAPIService",
+    "BatchTestAPIService",
+    "WorkflowAPIService",
+    "APIServiceFactory",
+    "API_SERVICES_AVAILABLE",
 ]

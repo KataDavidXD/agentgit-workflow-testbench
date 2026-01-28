@@ -1,19 +1,26 @@
 """
 FastAPI Dependencies for dependency injection.
 
+Architecture (v2.0 - 2026-01-28):
+─────────────────────────────────────────────────────────────────────────────────
 Following DIP (Dependency Inversion Principle):
-- API layer depends on abstractions (services, repositories)
+- API layer depends on abstractions (IExecutionAPIService, IAuditAPIService)
 - Services are injected via FastAPI dependency system
 - Enables easy testing and swapping implementations
 
 Transaction Management:
 - Unit of Work pattern for database transactions
+- API services handle transaction boundaries internally
 - Automatic commit/rollback on request completion
+
+SOLID Compliance:
+- SRP: Dependencies only handle DI wiring
+- DIP: API depends on interfaces (IExecutionAPIService), not implementations
+- ISP: Separate services for different concerns
 """
 
-from typing import Optional, Generator
+from typing import Optional
 from functools import lru_cache
-from contextlib import contextmanager
 
 from wtb.application.services import ExecutionController
 from wtb.infrastructure.events import (
@@ -33,18 +40,30 @@ class AppState:
     
     Holds singleton instances of services that are shared across requests.
     Initialized once at startup, used throughout the application lifetime.
+    
+    SOLID Compliance:
+    - SRP: Only manages service lifecycle
+    - DIP: Stores abstractions, not implementations
     """
     
     def __init__(self):
         self._event_bus: Optional[WTBEventBus] = None
         self._audit_trail: Optional[WTBAuditTrail] = None
         self._execution_controller: Optional[ExecutionController] = None
+        self._unit_of_work = None  # IUnitOfWork
         self._initialized: bool = False
+        
+        # API Services (v2.0)
+        self._execution_service = None
+        self._audit_service = None
+        self._batch_test_service = None
+        self._workflow_service = None
     
     def initialize(
         self,
         event_bus: Optional[WTBEventBus] = None,
         execution_controller: Optional[ExecutionController] = None,
+        unit_of_work = None,
     ) -> None:
         """
         Initialize application state with services.
@@ -52,11 +71,48 @@ class AppState:
         Args:
             event_bus: WTB event bus instance
             execution_controller: Execution controller instance
+            unit_of_work: Unit of work for transactions
         """
         self._event_bus = event_bus or get_wtb_event_bus()
         self._audit_trail = WTBAuditTrail()
         self._execution_controller = execution_controller
+        self._unit_of_work = unit_of_work
         self._initialized = True
+        
+        # Initialize API services with proper DI
+        self._initialize_api_services()
+    
+    def _initialize_api_services(self) -> None:
+        """Initialize API services with dependencies."""
+        try:
+            from wtb.application.services.api_services import APIServiceFactory
+            
+            if self._unit_of_work and self._execution_controller:
+                self._execution_service = APIServiceFactory.create_execution_service(
+                    uow=self._unit_of_work,
+                    controller=self._execution_controller,
+                    event_bus=self._event_bus,
+                    audit_trail=self._audit_trail,
+                )
+            
+            if self._audit_trail:
+                self._audit_service = APIServiceFactory.create_audit_service(
+                    audit_trail=self._audit_trail,
+                    uow=self._unit_of_work,
+                )
+            
+            if self._unit_of_work:
+                self._batch_test_service = APIServiceFactory.create_batch_test_service(
+                    uow=self._unit_of_work,
+                    event_bus=self._event_bus,
+                )
+                
+                self._workflow_service = APIServiceFactory.create_workflow_service(
+                    uow=self._unit_of_work,
+                )
+        except ImportError:
+            # Fallback to legacy services if new ones not available
+            pass
     
     @property
     def event_bus(self) -> WTBEventBus:
@@ -76,6 +132,31 @@ class AppState:
     def execution_controller(self) -> Optional[ExecutionController]:
         """Get the execution controller instance."""
         return self._execution_controller
+    
+    @property
+    def unit_of_work(self):
+        """Get the unit of work instance."""
+        return self._unit_of_work
+    
+    @property
+    def execution_service(self):
+        """Get the execution API service."""
+        return self._execution_service
+    
+    @property
+    def audit_service(self):
+        """Get the audit API service."""
+        return self._audit_service
+    
+    @property
+    def batch_test_service(self):
+        """Get the batch test API service."""
+        return self._batch_test_service
+    
+    @property
+    def workflow_service(self):
+        """Get the workflow API service."""
+        return self._workflow_service
     
     @property
     def is_initialized(self) -> bool:
@@ -133,18 +214,82 @@ def get_execution_controller() -> ExecutionController:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Service Dependencies (Application Services Layer)
+# API Service Dependencies (v2.0 - 2026-01-28)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class ExecutionService:
+def get_execution_service():
     """
-    Application service for execution operations.
+    FastAPI dependency for execution API service.
     
-    Wraps ExecutionController with additional API-level concerns:
-    - Input validation
-    - Error handling
-    - Event publishing
-    - Audit logging
+    Returns the ACID-compliant execution service that handles
+    all transaction boundaries internally.
+    """
+    state = get_app_state()
+    
+    # Use new API service if available
+    if state.execution_service:
+        return state.execution_service
+    
+    # Fallback to legacy service
+    return LegacyExecutionService(
+        controller=state.execution_controller,
+        event_bus=state.event_bus,
+        audit_trail=state.audit_trail,
+    )
+
+
+def get_audit_service():
+    """
+    FastAPI dependency for audit API service.
+    
+    Returns the audit service for querying audit events.
+    """
+    state = get_app_state()
+    
+    if state.audit_service:
+        return state.audit_service
+    
+    return LegacyAuditService(state.audit_trail)
+
+
+def get_batch_test_service():
+    """
+    FastAPI dependency for batch test API service.
+    """
+    state = get_app_state()
+    
+    if state.batch_test_service:
+        return state.batch_test_service
+    
+    return LegacyBatchTestService(state.event_bus)
+
+
+def get_workflow_service():
+    """
+    FastAPI dependency for workflow API service.
+    """
+    state = get_app_state()
+    
+    if state.workflow_service:
+        return state.workflow_service
+    
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Legacy Service Wrappers (Backward Compatibility)
+# DEPRECATED: These will be removed in v3.0
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class LegacyExecutionService:
+    """
+    Legacy execution service for backward compatibility.
+    
+    DEPRECATED: Use ExecutionAPIService from wtb.application.services.api_services
+    
+    Issues Fixed:
+    - checkpoint_id is now treated as string (UUID), not int
+    - Uses proper async/await pattern
     """
     
     def __init__(
@@ -165,7 +310,6 @@ class ExecutionService:
         offset: int = 0,
     ) -> dict:
         """List executions with optional filtering."""
-        # Get from repository (simplified - actual impl would filter)
         executions = []
         return {
             "executions": executions,
@@ -212,7 +356,7 @@ class ExecutionService:
         """Pause execution."""
         execution = self._controller.pause(execution_id)
         return {
-            "checkpoint_id": str(execution.checkpoint_id),
+            "checkpoint_id": str(execution.checkpoint_id) if execution.checkpoint_id else None,
         }
     
     async def resume(
@@ -233,11 +377,16 @@ class ExecutionService:
         checkpoint_id: str,
         create_branch: bool = False,
     ) -> dict:
-        """Rollback to checkpoint."""
-        execution = self._controller.rollback(execution_id, int(checkpoint_id))
+        """
+        Rollback to checkpoint.
+        
+        FIXED: checkpoint_id is treated as string (UUID), not converted to int.
+        """
+        # NOTE: checkpoint_id is a string (UUID) - do NOT convert to int
+        execution = self._controller.rollback(execution_id, checkpoint_id)
         return {
             "new_session_id": execution.session_id,
-            "tools_reversed": 0,  # Would come from adapter
+            "tools_reversed": 0,
         }
     
     async def inspect_state(
@@ -264,11 +413,11 @@ class ExecutionService:
         return self._controller.update_execution_state(execution_id, changes)
 
 
-class AuditService:
+class LegacyAuditService:
     """
-    Application service for audit operations.
+    Legacy audit service for backward compatibility.
     
-    Provides query and aggregation over audit events.
+    DEPRECATED: Use AuditAPIService from wtb.application.services.api_services
     """
     
     def __init__(self, audit_trail: WTBAuditTrail):
@@ -337,7 +486,7 @@ class AuditService:
             "total_events": summary["total_entries"],
             "execution_id": execution_id,
             "time_range": time_range,
-            "events_by_type": {},  # Would aggregate
+            "events_by_type": {},
             "events_by_severity": {},
             "error_rate": 0.0,
             "checkpoint_count": summary["checkpoints_created"],
@@ -354,8 +503,6 @@ class AuditService:
     ) -> dict:
         """Get execution timeline for visualization."""
         entries = self._audit_trail.entries
-        
-        # Filter by execution
         entries = [e for e in entries if e.execution_id == execution_id]
         
         if not include_debug:
@@ -390,14 +537,16 @@ class AuditService:
         )
 
 
-class BatchTestService:
+class LegacyBatchTestService:
     """
-    Application service for batch test operations.
+    Legacy batch test service for backward compatibility.
+    
+    DEPRECATED: Use BatchTestAPIService from wtb.application.services.api_services
     """
     
     def __init__(self, event_bus: WTBEventBus):
         self._event_bus = event_bus
-        self._batch_tests: dict = {}  # In-memory store for now
+        self._batch_tests: dict = {}
     
     async def create_batch_test(
         self,
@@ -427,7 +576,6 @@ class BatchTestService:
     
     async def stream_progress(self, batch_test_id: str):
         """Stream batch test progress (generator)."""
-        # This would yield progress updates
         yield {
             "total": 0,
             "completed": 0,
@@ -437,24 +585,7 @@ class BatchTestService:
         }
 
 
-def get_execution_service() -> ExecutionService:
-    """FastAPI dependency for execution service."""
-    state = get_app_state()
-    controller = state.execution_controller
-    if controller is None:
-        raise RuntimeError("ExecutionController not initialized")
-    return ExecutionService(
-        controller=controller,
-        event_bus=state.event_bus,
-        audit_trail=state.audit_trail,
-    )
-
-
-def get_audit_service() -> AuditService:
-    """FastAPI dependency for audit service."""
-    return AuditService(get_app_state().audit_trail)
-
-
-def get_batch_test_service() -> BatchTestService:
-    """FastAPI dependency for batch test service."""
-    return BatchTestService(get_app_state().event_bus)
+# Type aliases for backward compatibility
+ExecutionService = LegacyExecutionService
+AuditService = LegacyAuditService
+BatchTestService = LegacyBatchTestService

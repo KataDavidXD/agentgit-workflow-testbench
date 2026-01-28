@@ -18,6 +18,8 @@ from .repositories import (
     EvaluationResultRepository,
     NodeBoundaryRepository,
     SQLAlchemyCheckpointFileLinkRepository,
+    SQLAlchemyBlobRepository,
+    SQLAlchemyFileCommitRepository,
 )
 from .repositories.outbox_repository import SQLAlchemyOutboxRepository
 from .repositories.audit_repository import SQLAlchemyAuditLogRepository
@@ -35,15 +37,17 @@ class SQLAlchemyUnitOfWork(IUnitOfWork):
             uow.commit()
     """
     
-    def __init__(self, db_url: str = "sqlite:///wtb.db", echo: bool = False):
+    def __init__(self, db_url: str = "sqlite:///wtb.db", echo: bool = False, blob_storage_path: str = "./data/blobs"):
         """
         Initialize the Unit of Work.
         
         Args:
             db_url: Database connection URL
             echo: If True, log SQL statements
+            blob_storage_path: Path to blob storage
         """
         self._db_url = db_url
+        self._blob_storage_path = blob_storage_path
         self._engine = create_engine(db_url, echo=echo)
         self._session_factory = sessionmaker(bind=self._engine)
         self._session: Optional[Session] = None
@@ -66,6 +70,10 @@ class SQLAlchemyUnitOfWork(IUnitOfWork):
         # Initialize WTB Anti-Corruption Layer repositories
         self.node_boundaries = NodeBoundaryRepository(self._session)
         self.checkpoint_file_links = SQLAlchemyCheckpointFileLinkRepository(self._session)
+        
+        # Initialize File Processing repositories (2026-01-27)
+        self.blobs = SQLAlchemyBlobRepository(self._session, self._blob_storage_path)
+        self.file_commits = SQLAlchemyFileCommitRepository(self._session)
         
         # Initialize Outbox Pattern repository
         self.outbox = SQLAlchemyOutboxRepository(self._session)

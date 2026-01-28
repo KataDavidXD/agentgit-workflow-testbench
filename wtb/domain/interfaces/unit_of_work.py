@@ -19,7 +19,11 @@ if TYPE_CHECKING:
         IOutboxRepository,
         IAuditLogRepository,
     )
-    from .file_processing_repository import ICheckpointFileLinkRepository
+    from .file_processing_repository import (
+        ICheckpointFileLinkRepository,
+        IBlobRepository,
+        IFileCommitRepository,
+    )
 
 
 class IUnitOfWork(ABC):
@@ -54,6 +58,10 @@ class IUnitOfWork(ABC):
     # WTB-Specific Repositories (Anti-Corruption Layer)
     node_boundaries: "INodeBoundaryRepository"
     checkpoint_file_links: "ICheckpointFileLinkRepository"  # 2026-01-27: Renamed from checkpoint_files
+    
+    # File Processing Repositories
+    blobs: "IBlobRepository"
+    file_commits: "IFileCommitRepository"
     
     # Outbox Pattern (for cross-database consistency)
     outbox: "IOutboxRepository"

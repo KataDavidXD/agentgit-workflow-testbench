@@ -1,7 +1,7 @@
 # WTB (Workflow Test Bench) - Architecture Documentation
 
-**Last Updated:** 2026-01-27  
-**Version:** 1.0.0  
+**Last Updated:** 2026-01-28  
+**Version:** 1.0.1  
 **Status:** Implemented
 
 ---
@@ -23,9 +23,11 @@ WTB is a workflow testing framework that enables:
 
 | Document | Description | Status |
 |----------|-------------|--------|
-| [ARCHITECTURE_ISSUES.md](./ARCHITECTURE_ISSUES.md) | **Consolidated issues analysis and roadmap** | Current |
+| **[ARCHITECTURE_REVIEW_2026_01_28.md](./ARCHITECTURE_REVIEW_2026_01_28.md)** | **Latest architecture review (SOLID/ACID audit)** | **NEW** |
+| [ARCHITECTURE_ISSUES.md](./ARCHITECTURE_ISSUES.md) | Consolidated issues analysis and roadmap | Current |
 | [ARCHITECTURE_STRUCTURE.md](./ARCHITECTURE_STRUCTURE.md) | Codebase structure and layer organization | Current |
-| [ASYNC_ARCHITECTURE_PLAN.md](./ASYNC_ARCHITECTURE_PLAN.md) | **Full async architecture plan (v2.0)** | Proposed |
+| [ASYNC_ARCHITECTURE_PLAN.md](./ASYNC_ARCHITECTURE_PLAN.md) | Full async architecture plan (v2.0) | Proposed |
+| [ASYNC_FILE_TRACKING_SUMMARY.md](./ASYNC_FILE_TRACKING_SUMMARY.md) | Async implementation status & scenarios | Implemented |
 | [PROGRESS_TRACKER.md](./PROGRESS_TRACKER.md) | Implementation progress and TODO list | Current |
 
 ### Section Documentation
@@ -91,6 +93,12 @@ wtb/
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-01-28 | **ARCHITECTURE_REVIEW_2026_01_28.md** - Comprehensive SOLID/ACID audit, 14 issues identified | Senior Architect |
+| 2026-01-28 | **Fixed** CP-002: NodeBoundary repository returns str IDs (not CheckpointId) | Senior Architect |
+| 2026-01-28 | **Created** OutboxMapper for DRY compliance | Senior Architect |
+| 2026-01-28 | **Created** test_node_boundary_consistency.py (16 tests) | Senior Architect |
+| 2026-01-28 | **Created** migration 005_node_boundary_cleanup.sql | Senior Architect |
+| 2026-01-28 | **ASYNC_FILE_TRACKING_SUMMARY.md** - Async file tracking implementation & test scenarios | System |
 | 2026-01-27 | **ASYNC_ARCHITECTURE_PLAN.md v1.1** - Code review fixes (10 issues, 4 suggestions) | System |
 | 2026-01-27 | **Added ASYNC_ARCHITECTURE_PLAN.md (v2.0 roadmap)** | System |
 | 2026-01-27 | Verified v1.7 ACID compliance (Ray/ThreadPool) | System |

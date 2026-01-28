@@ -11,8 +11,13 @@ name = "12-22"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiofiles" },
+    { name = "aiosqlite" },
+    { name = "grpcio" },
+    { name = "grpcio-tools" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
+    { name = "protobuf" },
     { name = "sqlalchemy" },
 ]
 
@@ -90,15 +95,19 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiofiles", specifier = ">=25.1.0" },
+    { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "dill", marker = "extra == 'all'", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'ray'", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'test'", specifier = ">=0.3.7" },
     { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.109.0" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.109.0" },
     { name = "fastapi", marker = "extra == 'test'", specifier = ">=0.109.0" },
+    { name = "grpcio", specifier = ">=1.76.0" },
     { name = "grpcio", marker = "extra == 'all'", specifier = ">=1.60.0" },
     { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.60.0" },
     { name = "grpcio", marker = "extra == 'test'", specifier = ">=1.60.0" },
+    { name = "grpcio-tools", specifier = ">=1.76.0" },
     { name = "grpcio-tools", marker = "extra == 'all'", specifier = ">=1.60.0" },
     { name = "grpcio-tools", marker = "extra == 'grpc'", specifier = ">=1.60.0" },
     { name = "grpcio-tools", marker = "extra == 'test'", specifier = ">=1.60.0" },
@@ -125,6 +134,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.22.0" },
     { name = "prometheus-client", marker = "extra == 'all'", specifier = ">=0.17.0" },
     { name = "prometheus-client", marker = "extra == 'observability'", specifier = ">=0.17.0" },
+    { name = "protobuf", specifier = ">=6.33.4" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'all'", specifier = ">=3.1.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'langgraph-postgres'", specifier = ">=3.1.0" },
     { name = "pydantic", marker = "extra == 'all'", specifier = ">=2.5.0" },
@@ -145,6 +155,15 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'api'", specifier = ">=12.0" },
 ]
 provides-extras = ["ray", "langgraph-sqlite", "langgraph-postgres", "llm", "api", "grpc", "observability", "dev", "test", "all"]
+
+[[package]]
+name = "aiofiles"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/c3/534eac40372d8ee36ef40df62ec129bee4fdb5ad9706e58a29be53b2c970/aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2", size = 46354, upload-time = "2025-10-09T20:51:04.358Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/8a/340a1555ae33d7354dbca4faa54948d76d89a27ceef032c8c3bc661d003e/aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695", size = 14668, upload-time = "2025-10-09T20:51:03.174Z" },
+]
 
 [[package]]
 name = "aiosqlite"

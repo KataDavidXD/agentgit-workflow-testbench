@@ -88,29 +88,14 @@ Rationale:
 | `SQLAlchemyCheckpointFileLinkRepository` | `wtb/infrastructure/database/repositories/file_processing_repository.py` | ✅ Complete |
 | ORM Models | `wtb/infrastructure/database/file_processing_orm.py` | ✅ Complete |
 
-### 3.2 Gap: UoW Integration 🔶
+### 3.2 Gap: UoW Integration ✅
 
-**Current UoW (Missing file_commits):**
+**Status:** Implemented on 2026-01-28.
+
+**Current UoW (Complete):**
 
 ```python
 # wtb/infrastructure/database/unit_of_work.py
-class SQLAlchemyUnitOfWork(IUnitOfWork):
-    # Current repositories:
-    workflows: WorkflowRepository
-    executions: ExecutionRepository
-    node_boundaries: NodeBoundaryRepository
-    checkpoint_file_links: SQLAlchemyCheckpointFileLinkRepository  # ✅ Present
-    outbox: SQLAlchemyOutboxRepository
-    audit_logs: SQLAlchemyAuditLogRepository
-    
-    # MISSING:
-    # file_commits: SQLAlchemyFileCommitRepository  ❌
-    # blobs: SQLAlchemyBlobRepository               ❌
-```
-
-**Recommended UoW (Complete):**
-
-```python
 class SQLAlchemyUnitOfWork(IUnitOfWork):
     # WTB Core
     workflows: IWorkflowRepository
@@ -118,18 +103,18 @@ class SQLAlchemyUnitOfWork(IUnitOfWork):
     variants: INodeVariantRepository
     batch_tests: IBatchTestRepository
     evaluation_results: IEvaluationResultRepository
+    audit_logs: IAuditLogRepository
     
     # WTB ACL (Anti-Corruption Layer)
     node_boundaries: INodeBoundaryRepository
     
     # File Processing (COMPLETE)
-    blobs: IBlobRepository                          # ADD
-    file_commits: IFileCommitRepository             # ADD
+    blobs: IBlobRepository                          # ✅ Added
+    file_commits: IFileCommitRepository             # ✅ Added
     checkpoint_file_links: ICheckpointFileLinkRepository
     
     # Infrastructure
     outbox: IOutboxRepository
-    audit_logs: IAuditLogRepository
 ```
 
 ---
@@ -329,17 +314,20 @@ result = service.track_and_link(
 | Consider S3/MinIO blob backend | 🟢 Low | 1 week |
 | Distributed blob storage | 🟢 Low | 2 weeks |
 
-### 6.4 Async Architecture (v2.0)
+### 6.4 Async Architecture (v2.0) - ✅ IMPLEMENTED (2026-01-28)
 
-| Task | Priority | Effort | Reference |
+| Task | Priority | Status | Reference |
 |------|----------|--------|-----------|
-| Create `IAsyncBlobRepository` interface | 🔴 High | 2h | ASYNC_ARCHITECTURE_PLAN.md §4.1.1 |
-| Create `IAsyncFileCommitRepository` interface | 🔴 High | 2h | ASYNC_ARCHITECTURE_PLAN.md §4.1.1 |
-| Create `IAsyncCheckpointFileLinkRepository` interface | 🔴 High | 1h | ASYNC_ARCHITECTURE_PLAN.md §4.1.1 |
-| Add file repos to `IAsyncUnitOfWork` | 🔴 High | 1h | ASYNC_ARCHITECTURE_PLAN.md §4.1.2 |
-| Implement `AsyncSQLAlchemyBlobRepository` | 🔴 High | 4h | Uses aiofiles |
-| Implement `AsyncFileTrackerService` | 🟡 Medium | 4h | ASYNC_ARCHITECTURE_PLAN.md §4.3.3 |
-| Implement `AsyncBlobOrphanCleaner` | 🟡 Medium | 2h | ASYNC_ARCHITECTURE_PLAN.md §8.3.5 |
+| Create `IAsyncBlobRepository` interface | 🔴 High | ✅ Complete | `wtb/domain/interfaces/async_repositories.py` |
+| Create `IAsyncFileCommitRepository` interface | 🔴 High | ✅ Complete | `wtb/domain/interfaces/async_repositories.py` |
+| Create `IAsyncCheckpointFileLinkRepository` interface | 🔴 High | ✅ Complete | `wtb/domain/interfaces/async_repositories.py` |
+| Add file repos to `IAsyncUnitOfWork` | 🔴 High | ✅ Complete | `wtb/domain/interfaces/async_unit_of_work.py` |
+| Implement `AsyncSQLAlchemyBlobRepository` | 🔴 High | ✅ Complete | `wtb/infrastructure/database/async_repositories/async_file_processing_repository.py` |
+| Implement `AsyncFileTrackerService` | 🟡 Medium | ✅ Complete | `wtb/infrastructure/file_tracking/async_filetracker_service.py` |
+| Implement `AsyncBlobOrphanCleaner` | 🟡 Medium | ✅ Complete | `wtb/infrastructure/file_tracking/async_orphan_cleaner.py` |
+| Create `AsyncLangGraphStateAdapter` | 🔴 High | ✅ Complete | `wtb/infrastructure/adapters/async_langgraph_state_adapter.py` |
+| Create `AsyncExecutionController` | 🔴 High | ✅ Complete | `wtb/application/services/async_execution_controller.py` |
+| Transaction Consistency Tests | 🟡 Medium | ✅ Complete | `tests/test_file_processing/integration/test_async_transaction_consistency.py` |
 
 ---
 
@@ -512,9 +500,32 @@ wtb/infrastructure/file_tracking/
 | 2026-01-27 | Keep `file_processing/` as reference | No breaking changes, educational value |
 | 2026-01-27 | Recommend UoW integration for `file_commits` | Complete ACID across file operations |
 | 2026-01-27 | **Add async architecture alignment (v2.0)** | Non-blocking I/O, ASYNC_ARCHITECTURE_PLAN.md alignment |
+| 2026-01-28 | **Implement UoW Integration** | Added `blobs` and `file_commits` to `IUnitOfWork` and `SQLAlchemyUnitOfWork` |
+| 2026-01-28 | **Implement Async Architecture v2.0** | Full async stack: adapters, controllers, repositories, services |
+| 2026-01-28 | **Add Transaction Consistency Tests** | Comprehensive tests for Scenarios A-E (idempotency, partial commit, ordering, isolation, node env) |
+
+### 9.4 Implementation Summary (v2.0)
+
+**New Files Created (2026-01-28):**
+
+| File | Purpose |
+|------|---------|
+| `wtb/infrastructure/adapters/async_langgraph_state_adapter.py` | Async state adapter implementing `IAsyncStateAdapter` |
+| `wtb/application/services/async_execution_controller.py` | Async execution orchestration with ACID transactions |
+| `tests/test_file_processing/integration/test_async_transaction_consistency.py` | Comprehensive transaction consistency tests |
+
+**Error Scenarios Tested:**
+
+| Scenario | Problem | Solution | Test Class |
+|----------|---------|----------|------------|
+| A | Non-idempotent writes cause duplicates | Content-addressable storage (SHA-256) | `TestScenarioA_Idempotency` |
+| B | Partial commit leaves orphan data | Two-phase write + orphan cleanup | `TestScenarioB_PartialCommit` |
+| C | Async tasks lack ordering | Outbox pattern with FIFO guarantee | `TestScenarioC_AsyncOrdering` |
+| D | Stale reads across transactions | Session isolation + explicit commit | `TestScenarioD_StaleReads` |
+| E | Node env conflicts with workflow env | Node-level venv via GrpcEnvironmentProvider | `TestScenarioE_NodeEnvironmentIsolation` |
 
 ---
 
-**Document Version:** 1.1  
-**Last Updated:** 2026-01-27  
+**Document Version:** 2.0  
+**Last Updated:** 2026-01-28  
 **Authors:** Architecture Team

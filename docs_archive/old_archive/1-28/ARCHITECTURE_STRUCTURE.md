@@ -1,6 +1,6 @@
 # WTB Architecture Structure
 
-**Last Updated:** 2026-01-27  
+**Last Updated:** 2026-01-28  
 **Status:** Implemented
 
 ---
@@ -58,16 +58,18 @@
 wtb/api/
 ├── __init__.py
 ├── grpc/                    # gRPC definitions
+│   ├── __init__.py         # gRPC exports
+│   ├── servicer.py         # WTBServicer implementation (v2.1)
 │   └── protos/
-│       └── wtb.proto        # Protocol buffer definitions
+│       └── wtb_service.proto  # Protocol buffer definitions
 ├── rest/                    # REST API (FastAPI)
 │   ├── app.py              # FastAPI application setup
-│   ├── dependencies.py     # Dependency injection
+│   ├── dependencies.py     # Dependency injection (v2.1: API services)
 │   ├── models.py           # Pydantic request/response models
 │   └── routes/
 │       ├── batch.py        # Batch test endpoints
 │       ├── checkpoint.py   # Checkpoint operations
-│       ├── execution.py    # Execution lifecycle
+│       ├── executions.py   # Execution lifecycle
 │       ├── health.py       # Health checks
 │       ├── variant.py      # Node variant management
 │       └── workflow.py     # Workflow CRUD
@@ -75,9 +77,10 @@ wtb/api/
     └── handlers.py         # Real-time event streaming
 ```
 
-**SOLID Compliance:**
+**SOLID Compliance (v2.1):**
 - SRP: Each route file handles one domain concern
-- DIP: Routes depend on injected services via `dependencies.py`
+- DIP: Routes depend on API service interfaces (IExecutionAPIService, etc.)
+- ISP: Separate interfaces for Execution, Audit, BatchTest, Workflow operations
 
 ### 2.2 Application Layer (`wtb/application/`)
 
@@ -87,6 +90,7 @@ wtb/application/
 ├── factories.py                     # Service factory (DI container)
 └── services/
     ├── actor_lifecycle.py           # Ray actor lifecycle management
+    ├── api_services.py              # API service implementations (v2.1)
     ├── batch_test_runner.py         # Sequential batch runner
     ├── execution_controller.py      # Core execution orchestration
     ├── langgraph_node_replacer.py   # LangGraph-specific node swapping
@@ -104,6 +108,10 @@ wtb/application/
 | `RayBatchRunner` | Parallel variant execution with Ray actors | SRP ✅ |
 | `NodeReplacer` | A/B testing node substitution | OCP ✅ |
 | `ParityChecker` | Variant result comparison | SRP ✅ |
+| `ExecutionAPIService` | REST/gRPC execution operations (v2.1) | SRP, DIP ✅ |
+| `AuditAPIService` | REST/gRPC audit operations (v2.1) | SRP, DIP ✅ |
+| `BatchTestAPIService` | REST/gRPC batch test operations (v2.1) | SRP, DIP ✅ |
+| `WorkflowAPIService` | REST/gRPC workflow CRUD (v2.1) | SRP, DIP ✅ |
 
 ### 2.3 Domain Layer (`wtb/domain/`)
 
@@ -122,6 +130,7 @@ wtb/domain/
 │   └── workspace_events.py         # Workspace isolation events
 ├── interfaces/                      # Abstractions (Ports)
 │   ├── __init__.py                 # Interface exports
+│   ├── api_services.py             # API service interfaces (v2.1)
 │   ├── batch_runner.py             # IBatchTestRunner
 │   ├── checkpoint_store.py         # ICheckpointStore (PRIMARY)
 │   ├── evaluator.py                # IEvaluator, IEvaluationEngine
@@ -283,6 +292,12 @@ IRepository<T>
 IExecutionController
 ├── IExecutionRunner        # run, pause, resume, stop
 └── IExecutionInspector     # get_status, get_state
+
+API Service Interfaces (v2.1)
+├── IExecutionAPIService    # Execution lifecycle operations
+├── IAuditAPIService        # Audit event queries
+├── IBatchTestAPIService    # Batch test management
+└── IWorkflowAPIService     # Workflow CRUD
 ```
 
 ### 3.5 Dependency Inversion Principle (DIP)
@@ -478,7 +493,12 @@ class WTBEventBus:
 
 ```
 tests/
-├── test_api/                    # REST/integration tests
+├── test_api/                    # REST/gRPC/integration tests
+│   ├── test_api_services_unit.py        # API service unit tests (v2.1)
+│   ├── test_api_transaction_consistency.py  # ACID tests (v2.1)
+│   ├── test_external_control.py
+│   ├── test_rest_integration.py
+│   └── test_rest_models.py
 ├── test_file_processing/        # File tracking tests
 │   ├── integration/
 │   └── unit/
@@ -492,7 +512,7 @@ tests/
 │   └── test_pause_resume.py
 ├── test_sdk/                    # SDK tests
 ├── test_workspace/              # Workspace isolation tests
-└── test_wtb/                    # Core WTB tests (41 files)
+└── test_wtb/                    # Core WTB tests (47 files)
 ```
 
 ---
@@ -505,6 +525,105 @@ tests/
 - `ray` - Parallel execution (optional)
 - `fastapi` - REST API
 - `pydantic` - Data validation
+- `grpcio` / `grpcio-tools` - gRPC support (v2.1)
 
 ### Python Version
 - **Python 3.12** (Ray does not support 3.13 on Windows)
+
+---
+
+## 10. API Service Architecture (v2.1)
+
+### 10.1 Interface-Based Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    API SERVICE ARCHITECTURE (v2.1)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   REST Routes                    gRPC Servicer                              │
+│   (FastAPI)                      (WTBServicer)                              │
+│       │                              │                                      │
+│       └──────────────┬───────────────┘                                      │
+│                      │                                                      │
+│                      ▼                                                      │
+│   ┌──────────────────────────────────────────────────────────────────────┐ │
+│   │                    API Service Interfaces                             │ │
+│   │  ┌─────────────────────┐  ┌─────────────────────┐                    │ │
+│   │  │ IExecutionAPIService│  │ IAuditAPIService    │                    │ │
+│   │  │ - list_executions() │  │ - query_events()    │                    │ │
+│   │  │ - get_execution()   │  │ - get_summary()     │                    │ │
+│   │  │ - pause_execution() │  │ - get_timeline()    │                    │ │
+│   │  │ - resume_execution()│  └─────────────────────┘                    │ │
+│   │  │ - stop_execution()  │                                              │ │
+│   │  │ - rollback_exec()   │  ┌─────────────────────┐                    │ │
+│   │  │ - inspect_state()   │  │ IBatchTestAPIService│                    │ │
+│   │  │ - modify_state()    │  │ - create_batch()    │                    │ │
+│   │  │ - list_checkpoints()│  │ - get_batch()       │                    │ │
+│   │  │ - create_checkpoint │  │ - list_batches()    │                    │ │
+│   │  └─────────────────────┘  └─────────────────────┘                    │ │
+│   │                                                                       │ │
+│   │  ┌─────────────────────┐                                              │ │
+│   │  │ IWorkflowAPIService │                                              │ │
+│   │  │ - create_workflow() │                                              │ │
+│   │  │ - get_workflow()    │                                              │ │
+│   │  │ - list_workflows()  │                                              │ │
+│   │  │ - update_workflow() │                                              │ │
+│   │  │ - delete_workflow() │                                              │ │
+│   │  └─────────────────────┘                                              │ │
+│   └──────────────────────────────────────────────────────────────────────┘ │
+│                      │                                                      │
+│                      ▼                                                      │
+│   ┌──────────────────────────────────────────────────────────────────────┐ │
+│   │                    Concrete Implementations                           │ │
+│   │  ExecutionAPIService, AuditAPIService, BatchTestAPIService,          │ │
+│   │  WorkflowAPIService                                                   │ │
+│   │                                                                       │ │
+│   │  Dependencies:                                                        │ │
+│   │  ├── IUnitOfWork (transaction boundaries)                            │ │
+│   │  ├── IExecutionController (domain operations)                        │ │
+│   │  ├── IBatchTestRunner (batch execution)                              │ │
+│   │  └── OutboxRepository (event ordering)                               │ │
+│   └──────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 Transaction Flow
+
+```python
+# Example: Pause Execution with ACID Compliance
+async def pause_execution(self, execution_id: str, reason: str) -> ControlResultDTO:
+    """
+    1. Validate execution exists (Consistency)
+    2. Pause via ExecutionController (Atomicity)
+    3. Create outbox event (Durability)
+    4. Return DTO (Isolation via per-request UoW)
+    """
+    try:
+        execution = await self._controller.pause(execution_id)
+        # Outbox event created within same transaction
+        return ControlResultDTO(success=True, status=execution.status.value)
+    except ValueError as e:
+        return ControlResultDTO(success=False, error=str(e))
+```
+
+### 10.3 Outbox Event Types (v2.1)
+
+| Event Type | Description |
+|------------|-------------|
+| `EXECUTION_PAUSED` | Execution paused by user |
+| `EXECUTION_RESUMED` | Execution resumed |
+| `EXECUTION_STOPPED` | Execution stopped/cancelled |
+| `EXECUTION_FORKED` | Execution branched |
+| `EXECUTION_STATE_MODIFIED` | State manually modified |
+| `CHECKPOINT_CREATED_MANUAL` | Manual checkpoint created |
+| `CHECKPOINT_CREATED_AUTO` | Auto checkpoint (node boundary) |
+| `CHECKPOINT_CREATED_BREAKPOINT` | Breakpoint checkpoint |
+| `ROLLBACK_INITIATED` | Rollback started |
+| `ROLLBACK_COMPLETED` | Rollback finished |
+| `BATCH_TEST_CREATED` | Batch test started |
+| `BATCH_TEST_COMPLETED` | Batch test finished |
+| `WORKFLOW_CREATED` | Workflow registered |
+| `WORKFLOW_UPDATED` | Workflow modified |
+| `WORKFLOW_DELETED` | Workflow removed |

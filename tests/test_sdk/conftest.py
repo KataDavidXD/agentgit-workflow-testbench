@@ -410,11 +410,16 @@ def ray_initialized():
         pytest.skip("Ray not installed")
     
     if not ray.is_initialized():
-        ray.init(
-            num_cpus=2,
-            ignore_reinit_error=True,
-            log_to_driver=False,
-        )
+        try:
+            # Try to connect to existing cluster first (no resource specification)
+            ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False)
+        except ConnectionError:
+            # No existing cluster, start a local one with resources
+            ray.init(
+                num_cpus=2,
+                ignore_reinit_error=True,
+                log_to_driver=False,
+            )
     
     yield ray
     

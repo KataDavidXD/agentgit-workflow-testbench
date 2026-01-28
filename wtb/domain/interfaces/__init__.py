@@ -86,6 +86,24 @@ from .file_processing_repository import (
     IFileProcessingUnitOfWork,
 )
 
+# API Service Interfaces (v2.0 - 2026-01-28)
+from .api_services import (
+    IExecutionAPIService,
+    IAuditAPIService,
+    IBatchTestAPIService,
+    IWorkflowAPIService,
+    ExecutionDTO,
+    ControlResultDTO,
+    RollbackResultDTO,
+    CheckpointDTO,
+    PaginatedResultDTO,
+    AuditEventDTO,
+    AuditSummaryDTO,
+    BatchTestDTO,
+    BatchTestProgressDTO,
+    WorkflowDTO,
+)
+
 __all__ = [
     # ═══════════════════════════════════════════════════════════════════
     # PRIMARY INTERFACES (Use These)
@@ -161,4 +179,19 @@ __all__ = [
     "IFileCommitRepository",
     "ICheckpointFileLinkRepository",
     "IFileProcessingUnitOfWork",
+    # API Service Interfaces (v2.0 - 2026-01-28)
+    "IExecutionAPIService",
+    "IAuditAPIService",
+    "IBatchTestAPIService",
+    "IWorkflowAPIService",
+    "ExecutionDTO",
+    "ControlResultDTO",
+    "RollbackResultDTO",
+    "CheckpointDTO",
+    "PaginatedResultDTO",
+    "AuditEventDTO",
+    "AuditSummaryDTO",
+    "BatchTestDTO",
+    "BatchTestProgressDTO",
+    "WorkflowDTO",
 ]

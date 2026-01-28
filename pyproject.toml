@@ -8,6 +8,11 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "langgraph>=0.2.60",
     "langgraph-checkpoint>=2.0.10",
+    "aiofiles>=25.1.0",
+    "aiosqlite>=0.22.1",
+    "grpcio>=1.76.0",
+    "grpcio-tools>=1.76.0",
+    "protobuf>=6.33.4",
 ]
 
 [project.optional-dependencies]

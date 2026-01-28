@@ -1,6 +1,6 @@
 # File Processing Module
 
-**Last Updated:** 2026-01-27  
+**Last Updated:** 2026-01-28  
 **Parent:** [Project_Init/INDEX.md](../Project_Init/INDEX.md)
 
 ---
@@ -136,6 +136,7 @@ wtb/infrastructure/
 | Document | Description |
 |----------|-------------|
 | [FILE_TRACKING_ARCHITECTURE_DECISION.md](FILE_TRACKING_ARCHITECTURE_DECISION.md) | **Architecture Decision Record (2026-01-27)** |
+| [WTB_VS_STANDALONE_COMPARISON.md](WTB_VS_STANDALONE_COMPARISON.md) | **WTB vs Standalone 对比分析 (2026-01-28)** |
 | [../Project_Init/INDEX.md](../Project_Init/INDEX.md) | Main documentation |
 | [../Project_Init/ARCHITECTURE_STRUCTURE.md](../Project_Init/ARCHITECTURE_STRUCTURE.md) | Full architecture |
 | [../LangGraph/INDEX.md](../LangGraph/INDEX.md) | Checkpoint integration |
